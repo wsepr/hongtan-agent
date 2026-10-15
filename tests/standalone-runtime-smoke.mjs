@@ -15,14 +15,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { AGENT_VERSION } = await import(
-    path.join(root, "plugins", "hongtan-agent", "scripts", "version.mjs")
+    pathToFileURL(path.join(root, "plugins", "hongtan-agent", "scripts", "version.mjs"))
 );
 const { BROKER_VERSION } = await import(
-    path.join(root, "plugins", "hongtan-agent", "scripts", "broker-server.mjs")
+    pathToFileURL(path.join(root, "plugins", "hongtan-agent", "scripts", "broker-server.mjs"))
 );
 const contracts = JSON.parse(
     fs.readFileSync(path.join(root, "plugins", "hongtan-agent", "contracts", "xhs-agent-tools-v1.json"), "utf8"),
@@ -51,7 +51,11 @@ async function waitForBrokerHealth(port, timeoutMs = 20_000) {
 
 const stateDirectory = await mkdtemp(path.join(os.tmpdir(), "hongtan-agent-smoke-"));
 const port = 20_000 + Math.floor(Math.random() * 20_000);
+// CI 产物是原生 exe，直接 spawn；本地以 node shim（.cmd）代替产物验证时需 shell:true
+// （Node ≥ 20.12 禁止无 shell 直接 spawn .cmd/.bat）
+const needsShell = /\.(cmd|bat)$/i.test(binary);
 const child = spawn(binary, [], {
+    ...(needsShell ? { shell: true } : {}),
     env: {
         ...process.env,
         HONGTAN_AGENT_HOST: "workbuddy",
