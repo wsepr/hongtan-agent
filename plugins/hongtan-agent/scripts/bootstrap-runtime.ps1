@@ -60,8 +60,13 @@ function Get-ManifestSeedUrl {
     # 版本取自接入包 plugin.json（本脚本在 plugins/hongtan-agent/scripts/ 下，包根是其父目录）；
     # HONGTAN_AGENT_MANIFEST_SEED_URL 可显式覆盖（测试隔离 / 私有部署）。取不到版本则不做 seeding。
     if ($env:HONGTAN_AGENT_MANIFEST_SEED_URL) { return $env:HONGTAN_AGENT_MANIFEST_SEED_URL }
+    # 宿主布局差异：WorkBuddy 是 .codebuddy-plugin，Qoder 是 .qoder-plugin——按存在者取第一个
+    $pluginJsonPath = @(".codebuddy-plugin", ".qoder-plugin") |
+        ForEach-Object { Join-Path $PSScriptRoot "..\$_\plugin.json" } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if (-not $pluginJsonPath) { return "" }
     try {
-        $pluginJsonPath = Join-Path $PSScriptRoot "..\.codebuddy-plugin\plugin.json"
         $plugin = Get-Content -LiteralPath $pluginJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($plugin.version) {
             return "https://github.com/wsepr/hongtan-agent/releases/download/v$($plugin.version)/runtime.manifest.json"

@@ -334,7 +334,8 @@ export function createBroker({
         // 未完成 hello：仅接受 challenge/proof 与 hello
         if (!extensionSession || extensionSession.peer !== peer) {
             if (msg.type === "session.challenge") {
-                const proof = pairing.respondToChallenge(msg, null);
+                // extId 参与 proof 签名载荷（与插件侧 verifyProof 的 extId 同源），缺失按空串签名
+                const proof = pairing.respondToChallenge(msg, typeof msg.extId === "string" ? msg.extId : "");
                 peer.send(proof);
                 return;
             }
