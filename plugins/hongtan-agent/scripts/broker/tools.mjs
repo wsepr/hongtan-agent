@@ -10,10 +10,14 @@
  */
 
 import { validateAgainstSchema } from "./schema.mjs";
-import { BROKER_TERMINAL_STATES } from "./task-store.mjs";
+import { BROKER_TERMINAL_STATES, BROKER_INTERMEDIATE_STATES, WAIT_EARLY_RETURN_STATES } from "./task-store.mjs";
+import { contractsFingerprint, resolveBuildId } from "../build-fingerprint.mjs";
+import { AGENT_VERSION } from "../version.mjs";
 
 const err = (code, message) => ({ ok: false, error: { code, message } });
 const ok = (data) => ({ ok: true, data });
+
+const PROCESS_BUILD_ID = resolveBuildId();
 
 const XHS_URL_HOST_SUFFIX = "xiaohongshu.com";
 
@@ -67,17 +71,52 @@ export function createToolExecutor({
 } = {}) {
     const limits = contracts?.limits ?? {};
     const startedAt = now();
+    const contractsHash = contractsFingerprint(contracts ?? null);
     const options = {
         syncTimeoutMs: 10_000,
         waitPollIntervalMs: 500,
         cancelTimeoutMs: 30_000,
         extensionDeadlineMs: 90_000,
-        maxWaitSec: limits.waitTimeoutSecMax ?? 300,
+        // waitHangSecMax（问题清单 1.1）：单次挂起必须远小于宿主 ≈60s 放弃线；旧名 waitTimeoutSecMax 留作别名一版
+        maxWaitSec: limits.waitHangSecMax ?? limits.waitTimeoutSecMax ?? 300,
         ...config,
     };
 
     /** @type {Map<string, ReturnType<setTimeout>>} */
     const extensionDeadlineTimers = new Map();
+
+    // ------------------------------------------------------------------
+    // wait 事件驱动（问题清单 1.1）：taskStore 变更 → 25ms 去抖合并 → 唤醒该任务的 waiter。
+    // 2s 兜底 tick 只防漏事件（如监听链异常），正常路径不再 500ms 忙轮询。
+    // ------------------------------------------------------------------
+
+    /** @type {Map<string, Set<() => void>>} taskId -> waiters */
+    const wakeMap = new Map();
+    const dirtyTaskIds = new Set();
+    let wakeDebounceTimer = null;
+
+    function onTaskStoreChanged(taskId) {
+        if (taskId === undefined || taskId === null) {
+            // 批量变更（sweep 等）：唤醒全部 waiter 重新判定
+            for (const set of wakeMap.values()) {
+                for (const fn of set) fn();
+            }
+            return;
+        }
+        dirtyTaskIds.add(taskId);
+        if (wakeDebounceTimer) return;
+        wakeDebounceTimer = setTimeout(() => {
+            wakeDebounceTimer = null;
+            const ids = [...dirtyTaskIds];
+            dirtyTaskIds.clear();
+            for (const tid of ids) {
+                const set = wakeMap.get(tid);
+                if (set) for (const fn of set) fn();
+            }
+        }, 25);
+    }
+
+    const unsubscribeTaskChanges = taskStore.addChangeListener?.(onTaskStoreChanged) ?? null;
 
     function findTool(name) {
         return contracts?.tools?.find((t) => t.name === name) ?? null;
@@ -104,16 +143,50 @@ export function createToolExecutor({
     // 工具实现
     // ------------------------------------------------------------------
 
-    function toolConnectionStatus() {
+    function toolConnectionStatus(ctx = {}) {
         const info = session.extensionInfo();
         const active = taskStore.activeTask();
         const limit = info?.vip?.isVip ? limits.articleLimitMax ?? 500 : limits.nonVipArticleLimit ?? 20;
+        // runtime 块（问题清单 4.2/4.3）：「正在运行的是哪份代码」在 AI 必查的 connection_status 里自证。
+        // adapter 段为 null = 调用方较旧（未上送指纹头），不代表能力缺失。
+        const adapterFp = ctx?.adapterFingerprint ?? null;
+        const contractsMatch = adapterFp?.contractsHash ? adapterFp.contractsHash === contractsHash : null;
+        const helloFresh = !!(info?.connected && Number.isFinite(info?.lastSeenAt) && now() - info.lastSeenAt < 90_000);
         return ok({
             broker: {
                 version: contracts?.toolsVersion ? `tools@${contracts.toolsVersion}` : "unknown",
                 protocolVersion: contracts?.protocolVersion ?? 1,
                 uptimeSec: Math.round((now() - startedAt) / 1000),
                 activeTasks: taskStore.activeCount(),
+            },
+            runtime: {
+                broker: {
+                    version: AGENT_VERSION,
+                    buildId: PROCESS_BUILD_ID,
+                    contractsHash,
+                    startedAt,
+                    pid: process.pid,
+                    mode: process.versions.bun ? "standalone" : "node",
+                    node: process.version,
+                    effectiveLimits: limits,
+                },
+                adapter: adapterFp
+                    ? {
+                          version: adapterFp.version,
+                          buildId: adapterFp.buildId,
+                          contractsHash: adapterFp.contractsHash,
+                          hostKey: process.env.HONGTAN_AGENT_HOST ?? null,
+                      }
+                    : null,
+                extension: {
+                    version: info?.version ?? null,
+                    helloAt: info?.lastSeenAt ?? null,
+                },
+                agreement: {
+                    contractsMatch,
+                    helloFresh,
+                    staleSuspect: contractsMatch === false,
+                },
             },
             extension: {
                 connected: info?.connected ?? false,
@@ -243,10 +316,10 @@ export function createToolExecutor({
     function toolResumeTask(taskId) {
         const task = taskStore.get(taskId);
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${taskId}`);
-        if (!["blocked_by_risk", "stalled_by_background"].includes(task.state)) {
+        if (!BROKER_INTERMEDIATE_STATES.has(task.state)) {
             return err(
                 "RESUME_NOT_APPLICABLE",
-                `任务当前状态 ${task.state} 不支持续接（仅 blocked_by_risk / stalled_by_background 可续接）`
+                `任务当前状态 ${task.state} 不支持续接（仅 blocked_by_risk / stalled_by_background / interrupted 可续接）`
             );
         }
         if (!session.isConnected()) {
@@ -269,7 +342,6 @@ export function createToolExecutor({
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${args?.taskId}`);
         return ok(taskStore.snapshot(task));
     }
-
     function toolTaskList(args) {
         const limit = Math.min(Math.max(1, args?.limit ?? 20), 50);
         // datasetId：按插件上报的真实数据集归属过滤（重名/改名后按名字无法定位）
@@ -280,30 +352,77 @@ export function createToolExecutor({
         });
     }
 
+    /**
+     * wait 的早退等待：终态或任一中间态（含 interrupted）立即返回。
+     * 主路径是 taskStore 变更事件（25ms 去抖合并），sleep（可注入）仅作 2s 兜底与 deadline 推进——
+     * 因此正常路径无忙轮询，且测试可推时钟。
+     */
+    function waitForWake(taskId) {
+        let resolve;
+        const promise = new Promise((r) => (resolve = r));
+        const set = wakeMap.get(taskId) ?? new Set();
+        wakeMap.set(taskId, set);
+        const fn = () => resolve();
+        set.add(fn);
+        return {
+            promise,
+            dispose: () => {
+                set.delete(fn);
+                if (set.size === 0) wakeMap.delete(taskId);
+            },
+        };
+    }
+
+    async function waitForEarlyReturn(taskId, deadline) {
+        for (;;) {
+            const current = taskStore.get(taskId);
+            if (!current || WAIT_EARLY_RETURN_STATES.has(current.state)) return;
+            const remaining = deadline - now();
+            if (remaining <= 0) return;
+            const wake = waitForWake(taskId);
+            await Promise.race([wake.promise, sleep(Math.min(2000, remaining))]);
+            wake.dispose();
+        }
+    }
+
+    function buildWaitHint(task) {
+        if (BROKER_TERMINAL_STATES.has(task.state)) {
+            return { nextAction: "finished", suggestedWaitSec: 0 };
+        }
+        if (task.state === "blocked_by_risk") {
+            return { nextAction: "need_human", suggestedWaitSec: 0 };
+        }
+        // 其余早退均为中间态：插件多在自愈，短挂起续读即可
+        return { nextAction: "wait_more", suggestedWaitSec: 15 };
+    }
+
     async function toolWaitForTask(args) {
         const task = taskStore.get(args?.taskId);
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${args?.taskId}`);
-        const timeoutSec = Math.min(Math.max(1, args?.timeoutSec ?? options.maxWaitSec), options.maxWaitSec);
+        const requestedSec = args?.timeoutSec ?? options.maxWaitSec;
+        const timeoutSec = Math.min(Math.max(1, requestedSec), options.maxWaitSec);
         const sinceSeq = Number.isFinite(args?.sinceSeq) ? args.sinceSeq : 0;
         const deadline = now() + timeoutSec * 1000;
 
-        // 「完成 / 失败 / 需人工介入 / 超时」才返回：终态或中间态（blocked/stalled）均返回
-        while (now() < deadline) {
-            const current = taskStore.get(args.taskId);
-            if (!current) break;
-            if (BROKER_TERMINAL_STATES.has(current.state) || ["blocked_by_risk", "stalled_by_background"].includes(current.state)) {
-                break;
-            }
-            await sleep(options.waitPollIntervalMs);
-        }
+        await waitForEarlyReturn(args.taskId, deadline);
+
         const current = taskStore.get(args.taskId);
         if (!current) return err("TASK_NOT_FOUND", `任务不存在: ${args.taskId}`);
-        const { entries, lastSeq } = taskStore.progressSince(args.taskId, sinceSeq);
+        const progress = taskStore.progressSince(args.taskId, sinceSeq);
+        const earlyReturn = WAIT_EARLY_RETURN_STATES.has(current.state);
         return ok({
             snapshot: taskStore.snapshot(current),
-            progressSince: entries,
-            lastSeq,
-            timedOut: !BROKER_TERMINAL_STATES.has(current.state) && !["blocked_by_risk", "stalled_by_background"].includes(current.state),
+            progressSince: progress.entries,
+            lastSeq: progress.lastSeq,
+            // 游标缺口显式化（问题清单 1.5）：truncated=游标落在已被环形裁掉的区间；
+            // droppedCount=本轮响应之外被省略的条数（单轮口径）；ringDroppedTotal=环形裁剪跨轮累计
+            firstAvailableSeq: progress.firstAvailableSeq,
+            droppedCount: progress.droppedCount,
+            ringDroppedTotal: progress.ringDroppedTotal,
+            truncated: progress.truncated,
+            effectiveTimeoutSec: timeoutSec,
+            timedOut: !earlyReturn,
+            hint: buildWaitHint(current),
         });
     }
 
@@ -322,6 +441,8 @@ export function createToolExecutor({
         if (!taskStore.setState(task, "canceling")) {
             return err("CANCEL_REJECTED", `当前状态 ${task.state} 不允许取消`);
         }
+        // 取消派发对象：running 及全部中间态（含 interrupted）都可能在插件侧持有抓取循环；
+        // 与 WAIT_EARLY_RETURN_STATES 不同构（含 running、不含终态），保持独立字面量
         if (session.isConnected() && ["running", "blocked_by_risk", "stalled_by_background", "interrupted"].includes(previousState)) {
             session.sendTaskCancel(task.id);
         }
@@ -346,7 +467,7 @@ export function createToolExecutor({
     // 分发
     // ------------------------------------------------------------------
 
-    async function executeTool(tool, args) {
+    async function executeTool(tool, args, ctx = {}) {
         // action 级限流（§10.5）：未知工具不计数，已知工具先在滑窗内判定
         if (rateLimiter && findTool(tool)) {
             const verdict = rateLimiter.check(tool);
@@ -364,7 +485,7 @@ export function createToolExecutor({
         audit?.append("tool_call", { tool });
         switch (tool) {
             case "xhs_connection_status":
-                return toolConnectionStatus();
+                return toolConnectionStatus(ctx);
             case "xhs_list_datasets":
                 return syncRequest("list_datasets", {});
             case "xhs_create_dataset":
@@ -398,10 +519,20 @@ export function createToolExecutor({
                 extensionDeadlineTimers.delete(taskId);
             }
         },
-        /** Broker 关闭时清理截止计时器 */
+        /** Broker 关闭时清理截止计时器、唤醒全部 waiter 并退订变更监听 */
         dispose() {
             for (const timer of extensionDeadlineTimers.values()) clearTimeout(timer);
             extensionDeadlineTimers.clear();
+            for (const set of wakeMap.values()) {
+                for (const fn of set) fn();
+            }
+            wakeMap.clear();
+            if (wakeDebounceTimer) {
+                clearTimeout(wakeDebounceTimer);
+                wakeDebounceTimer = null;
+            }
+            dirtyTaskIds.clear();
+            unsubscribeTaskChanges?.();
         },
     };
 }

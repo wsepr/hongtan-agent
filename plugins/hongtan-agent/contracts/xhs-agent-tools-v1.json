@@ -2,13 +2,14 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 1,
-    "toolsVersion": 1,
-    "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。",
+    "toolsVersion": 2,
+    "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
         "nonVipArticleLimit": 20,
         "keywordMaxLength": 50,
         "datasetNameMaxLength": 50,
+        "waitHangSecMax": 30,
         "waitTimeoutSecMax": 300,
         "startCrawlMinIntervalMs": 600000,
         "taskCountPer24h": 24,
@@ -17,127 +18,147 @@
     "errorCodes": {
         "AGENT_DISABLED": {
             "message": "插件「Agent 接管」总开关为关",
-            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中开启；不要重试。",
+            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中开启；不要重试。重复执行只会再次被拒，开关不解决重试无意义。",
             "retryable": false
         },
         "DEVICE_NOT_APPROVED": {
             "message": "设备未批准或已被撤销",
-            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中核对本机设备指纹并点击批准。",
+            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中核对本机设备指纹并点击批准。重复执行无意义，必须先完成人工批准。",
             "retryable": false
         },
         "BROWSER_OFFLINE": {
             "message": "浏览器未运行，Broker 正在拉起",
-            "aiGuidance": "告知用户「正在启动浏览器，请稍候」，用 xhs_task_status 轮询跟进（间隔不少于 10 秒）。不要报错、不要重试、不要宣告失败；若机器关机/休眠则为物理上限，如实告知。",
+            "aiGuidance": "告知用户「正在启动浏览器，请稍候」，用 xhs_task_status 轮询跟进（间隔不少于 10 秒）。不要报错、不要重试、不要宣告失败；若机器关机/休眠则为物理上限，如实告知。重复调用只是叠加等待，不会加速拉起。",
             "retryable": false
         },
         "EXTENSION_OFFLINE": {
             "message": "浏览器在运行，但红探扩展未连接（休眠/重连中）",
-            "aiGuidance": "说明「抓取扩展暂时休眠，稍后即可恢复」，用 xhs_task_status 轮询（间隔不少于 10 秒）；禁止紧密重试。",
+            "aiGuidance": "说明「抓取扩展暂时休眠，稍后即可恢复」，用 xhs_task_status 轮询（间隔不少于 10 秒）；禁止紧密重试。紧密重复只会刷出更多同类错误并延长休眠。",
             "retryable": false
         },
         "EXTENSION_UNAVAILABLE": {
             "message": "拉起浏览器后扩展仍未连接",
-            "aiGuidance": "说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 chrome://extensions 与插件的 Agent 接管开关。",
+            "aiGuidance": "说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 chrome://extensions 与插件的 Agent 接管开关。重复执行无法修复安装/权限问题。",
             "retryable": false
         },
         "PROTOCOL_VERSION_MISMATCH": {
             "message": "协议版本不匹配",
-            "aiGuidance": "提示用户升级红探插件或红探 Agent 运行时。",
+            "aiGuidance": "提示用户升级红探插件或红探 Agent 运行时。重复执行结果相同，必须先升级。",
             "retryable": false
         },
         "VIP_REQUIRED": {
             "message": "AI 联动为 VIP 专属能力（非 VIP 或会员态无法确认）",
-            "aiGuidance": "如实说明「AI 联动为 VIP 功能」，引导用户开通会员或登录红探账号；不要重试。",
+            "aiGuidance": "如实说明「AI 联动为 VIP 功能」，引导用户开通会员或登录红探账号；不要重试。重复执行只会再次被拒。",
             "retryable": false
         },
         "NOT_LOGGED_IN": {
             "message": "小红书未登录（页面被重定向到登录页）",
-            "aiGuidance": "提示用户在浏览器中登录小红书后重试。",
+            "aiGuidance": "提示用户在浏览器中登录小红书后重试。登录前重复执行只会再次撞登录墙。",
             "retryable": false
         },
         "LOGIN_WALL": {
             "message": "小红书登录墙：页面可打开但未登录导致结果列表为空",
-            "aiGuidance": "提示用户在浏览器中登录小红书后重试。",
+            "aiGuidance": "提示用户在浏览器中登录小红书后重试。登录前重复执行只会再次撞墙。",
             "retryable": false
         },
         "CONTENT_NOT_READY": {
             "message": "页面内容脚本未就绪（超时或页面类型不符）",
-            "aiGuidance": "说明页面类型可能不符或被重定向；最多允许重试一次。",
+            "aiGuidance": "说明页面类型可能不符或被重定向；最多允许重试一次。注意该码成因多样（页面没跟上 / 消息超时但抓取可能已开始 / 页面已有别的抓取在跑 / 抓取异常），盲目多次重试无法区分成因——重试前先用 xhs_task_status 查看是否已有任务在跑。",
             "retryable": true
         },
         "URL_NOT_MATCHED": {
             "message": "目标 URL 不在插件注入范围（仅支持搜索结果页 / 笔记详情页 / 用户主页）",
-            "aiGuidance": "说明该 URL 不受支持，请改用 keyword 搜索。",
+            "aiGuidance": "说明该 URL 不受支持，请改用 keyword 搜索。重复执行结果相同。",
             "retryable": false
         },
         "TAB_UNAVAILABLE": {
             "message": "抓取标签页已关闭或不可用",
-            "aiGuidance": "插件会自动恢复；若达到恢复上限将返回 RESUME_EXHAUSTED，届时建议人工检查浏览器。",
+            "aiGuidance": "插件会自动恢复；若达到恢复上限将返回 RESUME_EXHAUSTED，届时建议人工检查浏览器。恢复期内人工干预（开新任务/取消）会打断自动恢复。",
             "retryable": false
         },
         "TASK_BUSY": {
             "message": "已有抓取任务在进行",
-            "aiGuidance": "先用 xhs_task_status 查询当前任务，勿盲目启动新任务。",
+            "aiGuidance": "先用 xhs_task_status 查询当前任务，勿盲目启动新任务。重复执行只会再次撞单飞互斥，不会排队。",
             "retryable": false
         },
         "CANCEL_TIMEOUT": {
             "message": "取消确认超时，抓取可能仍在进行",
-            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。",
+            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。立即重复取消可能落进同一个确认窗口，先查状态再决定。",
             "retryable": true
         },
         "CANCEL_REJECTED": {
             "message": "取消请求被插件拒绝",
-            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。",
+            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。立即重复取消结果相同，先查状态再决定。",
             "retryable": true
         },
         "BLOCKED_BY_RISK": {
             "message": "触发风控 / 验证码 / 需人工处理",
-            "aiGuidance": "提示用户在浏览器中完成验证后，主动告知你继续；禁止自动重试。",
+            "aiGuidance": "提示用户在浏览器中完成验证后，主动告知你继续；禁止自动重试。自动重试只会反复触发风控页面并加重风控。",
             "retryable": false
         },
         "STALLED_BY_BACKGROUND": {
             "message": "抓取窗口被遮挡或最小化，任务已暂停",
-            "aiGuidance": "转述「页面被遮挡，任务已暂停，请勿遮挡/最小化抓取窗口」；解除遮挡后自动恢复；这是中间态，不要重试、不要判失败。",
+            "aiGuidance": "转述「页面被遮挡，任务已暂停，请勿遮挡/最小化抓取窗口」；解除遮挡后自动恢复；这是中间态，不要重试、不要判失败。重试会新建任务而非恢复当前任务，且额外消耗配额。",
             "retryable": false
         },
         "QUOTA_EXCEEDED": {
             "message": "任务节奏配额冷却中（按上次任务请求量折算）",
-            "aiGuidance": "消息中会给出可重试的绝对时刻（如「建议 14:35 后再开始」，或 24 小时内任务数已达上限）；如实转述该时刻，不要连续启动、不要换成别的工具尝试绕过。",
+            "aiGuidance": "消息中会给出可重试的绝对时刻（如「建议 14:35 后再开始」，或 24 小时内任务数已达上限）；如实转述该时刻，不要连续启动、不要换成别的工具尝试绕过。试跑只会再次被拒，并可能因新增请求量加重冷却。",
             "retryable": false
         },
         "DATASET_QUOTA_EXCEEDED": {
             "message": "数据集写入上限（VIP 500 篇）",
-            "aiGuidance": "说明可能只入库了部分，建议换一个新数据集。",
+            "aiGuidance": "说明可能只入库了部分，建议换一个新数据集。继续对同一数据集执行只会再次被拒。",
             "retryable": false
         },
         "RESUME_EXHAUSTED": {
             "message": "自动恢复次数已达上限",
-            "aiGuidance": "说明任务反复中断，建议用户人工检查浏览器环境。",
+            "aiGuidance": "说明任务反复中断，建议用户人工检查浏览器环境。继续重试只会继续失败。",
             "retryable": false
         },
         "RESUME_NOT_APPLICABLE": {
             "message": "该任务当前状态不支持续接",
-            "aiGuidance": "先用 xhs_task_status 确认状态：只有 blocked_by_risk / stalled_by_background 才可续接；其余情况按该状态的指引处理。",
+            "aiGuidance": "先用 xhs_task_status 确认状态：只有 blocked_by_risk / stalled_by_background / interrupted 才可续接；其余情况按该状态的指引处理。不改状态的重复续跑结果相同。",
             "retryable": false
         },
         "RATE_LIMITED": {
             "message": "操作过于频繁（限流）",
-            "aiGuidance": "说明操作过频，稍后重试。",
+            "aiGuidance": "说明操作过频，稍后重试。立即重试会延长限流窗口。",
             "retryable": true
         },
         "TASK_NOT_FOUND": {
             "message": "任务不存在",
-            "aiGuidance": "核对 taskId 是否来自 xhs_start_crawl 的返回；任务可能已超过 24 小时被清理。",
+            "aiGuidance": "核对 taskId 是否来自 xhs_start_crawl 的返回；任务可能已超过 24 小时被清理。重复调用结果相同。",
             "retryable": false
         },
         "INVALID_ARGS": {
             "message": "参数校验失败",
-            "aiGuidance": "按工具 inputSchema 修正参数后重试（注意 articleLimit 必填）。",
+            "aiGuidance": "按工具 inputSchema 修正参数后重试（注意 articleLimit 必填）。不改参数的重试结果相同。",
             "retryable": true
         },
         "UNKNOWN_TOOL": {
             "message": "未知工具",
-            "aiGuidance": "用 xhs_connection_status 查看可用能力；工具列表可能需要升级运行时。",
+            "aiGuidance": "用 xhs_connection_status 查看可用能力；工具列表可能需要升级运行时。重复调用结果相同。",
+            "retryable": false
+        },
+        "BROKER_NO_RESPONSE": {
+            "message": "请求已送达 Broker 但未在时限内收到响应，执行结果未知",
+            "aiGuidance": "先调 xhs_task_status 确认是否已生效，禁止直接重发等待/启动类调用（xhs_wait_for_task / xhs_start_crawl / xhs_cancel_task）。重发有副作用的工具可能造成重复执行或把会话再挂满一轮。",
+            "retryable": false
+        },
+        "RUNTIME_STALE": {
+            "message": "运行进程旧于当前契约（contractsHash 不一致）",
+            "aiGuidance": "结束该 Broker 进程（pid 见消息）后，下一次工具调用会自动重拉新版本，无需重启宿主；不要反复重试，也不要远程杀进程以外的操作。",
+            "retryable": false
+        },
+        "BROKER_ERROR": {
+            "message": "Broker 内部执行异常",
+            "aiGuidance": "该调用可能已部分生效：启动/等待/取消类先调 xhs_task_status 确认现场，再决定是否重试；持续出现说明运行时异常（若伴随 contractsHash 不一致，按 RUNTIME_STALE 处置）。",
+            "retryable": false
+        },
+        "BROKER_UNREACHABLE": {
+            "message": "Broker 未运行且自动拉起失败",
+            "aiGuidance": "提示用户手动启动红探 Agent 服务（node scripts/broker-server.mjs）后再试；不要紧密重试。",
             "retryable": false
         }
     },
@@ -145,7 +166,7 @@
         {
             "name": "xhs_connection_status",
             "kind": "control",
-            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason）、activeTask 与 onboarding 提示。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
+            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -181,7 +202,9 @@
                         "description": "数据集描述（可选，最长 200 字符）"
                     }
                 },
-                "required": ["name"]
+                "required": [
+                    "name"
+                ]
             }
         },
         {
@@ -209,7 +232,9 @@
                         "description": "新名称（1-50 字符）"
                     }
                 },
-                "required": ["newName"]
+                "required": [
+                    "newName"
+                ]
             }
         },
         {
@@ -257,7 +282,10 @@
                             },
                             "crawlMode": {
                                 "type": "string",
-                                "enum": ["standard", "smart"],
+                                "enum": [
+                                    "standard",
+                                    "smart"
+                                ],
                                 "description": "抓取频率档位（默认 smart；智能档更保守，适合无人值守长跑）"
                             },
                             "crawlCommentImages": {
@@ -268,7 +296,9 @@
                         "required": []
                     }
                 },
-                "required": ["articleLimit"]
+                "required": [
+                    "articleLimit"
+                ]
             }
         },
         {
@@ -284,7 +314,9 @@
                         "description": "xhs_start_crawl 返回的任务 ID"
                     }
                 },
-                "required": ["taskId"]
+                "required": [
+                    "taskId"
+                ]
             }
         },
         {
@@ -312,7 +344,7 @@
         {
             "name": "xhs_wait_for_task",
             "kind": "blocking",
-            "description": "阻塞等待任务达到「完成 / 失败 / 需人工介入 / 超时」后返回，按 sinceSeq 只回传进度增量。单次挂起上限 300 秒，超时返回当前快照（调用方可再次调用续等）。适合用户要求持续跟进时使用；不要为了数小时的任务反复紧密轮询。",
+            "description": "短挂起等待任务变化后返回，按 sinceSeq 只回传进度增量。单次挂起上限 30 秒（由 Broker 按 limits.waitHangSecMax 自钳，响应回 effectiveTimeoutSec），超时返回当前快照（timedOut=true）——标准用法是连续短挂起：不传 timeoutSec 用默认值，把上一次返回的 lastSeq 原样作为下次 sinceSeq。响应带 hint{nextAction: finished/wait_more/need_human, suggestedWaitSec} 与游标缺口信号（truncated、droppedCount=本轮响应省略条数、ringDroppedTotal=环形裁剪跨轮累计、firstAvailableSeq）。适合用户要求持续跟进时使用；不要为了数小时的任务反复紧密轮询。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -324,8 +356,8 @@
                     "timeoutSec": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 300,
-                        "description": "最长等待秒数（默认 300）"
+                        "maximum": 60,
+                        "description": "本次挂起秒数（默认 30，建议不传；超过 limits.waitHangSecMax 的值会被 Broker 自钳并回 effectiveTimeoutSec）"
                     },
                     "sinceSeq": {
                         "type": "integer",
@@ -333,7 +365,9 @@
                         "description": "只回传 seq 大于该值的进度增量（上次调用返回的 lastSeq）"
                     }
                 },
-                "required": ["taskId"]
+                "required": [
+                    "taskId"
+                ]
             }
         },
         {
@@ -349,7 +383,9 @@
                         "description": "任务 ID"
                     }
                 },
-                "required": ["taskId"]
+                "required": [
+                    "taskId"
+                ]
             }
         }
     ]

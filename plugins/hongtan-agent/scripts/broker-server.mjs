@@ -29,12 +29,14 @@ import { createOsProbes } from "./broker/browser/os-probes.mjs";
 import { loadOrCreateDeviceIdentity, resolveStateDirectory } from "./device-identity.mjs";
 import { createKeepAwake } from "./keep-awake.mjs";
 import { createAutostart } from "./autostart.mjs";
+import { contractsFingerprint, resolveBuildId } from "./build-fingerprint.mjs";
 // 静态 import 而非 fs 读取：standalone 产物（bun compile）不内嵌运行时 readFileSync 的文件
 import contractsJson from "../contracts/xhs-agent-tools-v1.json" with { type: "json" };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const BROKER_VERSION = "0.1.0";
+const BUILD_ID = resolveBuildId();
 
 // ====================================================================
 // 配置
@@ -208,6 +210,51 @@ export function createBroker({
             return "请在红探插件设置 →「Agent 接管」→ 设备管理中核对本机指纹并点击批准";
         }
         return null;
+    }
+
+    // 运行时指纹（问题清单 4.3）：对「本进程实际生效的契约对象」取哈希——DI 可注入测试桩，
+    // 哈希必须反映实际使用的那份，而非磁盘文件
+    const contractsHash = contractsFingerprint(contracts ?? contractsJson);
+
+    // ------------------------------------------------------------------
+    // /v1/mcp 请求级幂等回放（问题清单 1.4）：adapter 重试时复用 X-Hongtan-Request-Id，
+    // 命中即回放首次结果，杜绝「传输层重试导致副作用工具二次执行」
+    // ------------------------------------------------------------------
+
+    const MCP_REPLAY_TTL_MS = 10 * 60 * 1000;
+    const MCP_REPLAY_MAX = 256;
+    /** @type {Map<string, {result: any, at: number}>} */
+    const mcpReplay = new Map();
+
+    function replayGet(requestId) {
+        const hit = mcpReplay.get(requestId);
+        if (!hit) return null;
+        if (now() - hit.at > MCP_REPLAY_TTL_MS) {
+            mcpReplay.delete(requestId);
+            return null;
+        }
+        // LRU touch
+        mcpReplay.delete(requestId);
+        mcpReplay.set(requestId, hit);
+        return hit.result;
+    }
+
+    function replayPut(requestId, result) {
+        mcpReplay.delete(requestId);
+        mcpReplay.set(requestId, { result, at: now() });
+        while (mcpReplay.size > MCP_REPLAY_MAX) {
+            mcpReplay.delete(mcpReplay.keys().next().value);
+        }
+    }
+
+    /** adapter 指纹头（X-Hongtan-Adapter-*）→ ctx.adapterFingerprint，供 runtime 块自证 */
+    function adapterFingerprintFrom(req) {
+        const h = req.headers;
+        const version = typeof h["x-hongtan-adapter-version"] === "string" ? h["x-hongtan-adapter-version"] : null;
+        const buildId = typeof h["x-hongtan-adapter-build-id"] === "string" ? h["x-hongtan-adapter-build-id"] : null;
+        const hash = typeof h["x-hongtan-adapter-contracts-hash"] === "string" ? h["x-hongtan-adapter-contracts-hash"] : null;
+        if (!version && !buildId && !hash) return null;
+        return { version, buildId, contractsHash: hash };
     }
 
     const tools = createToolExecutor({
@@ -531,6 +578,14 @@ export function createBroker({
             reply(res, 200, {
                 ok: true,
                 version: BROKER_VERSION,
+                // 运行时指纹（问题清单 4.2/4.3）：pid/startedAt/contractsHash 让「键不存在 vs 键为 null」
+                // 可机判——与 adapter 侧哈希比对即证伪运行进程是否旧于源码
+                pid: process.pid,
+                startedAt: new Date(startedAt).toISOString(),
+                contractsHash,
+                buildId: BUILD_ID,
+                mode: process.versions.bun ? "standalone" : "node",
+                node: process.version,
                 uptimeSec: Math.round((now() - startedAt) / 1000),
                 extension: {
                     connected: sessionFacade.isConnected(),
@@ -550,8 +605,32 @@ export function createBroker({
         if (req.method === "POST" && url.pathname === "/v1/mcp") {
             const body = await readJsonBody(req, res);
             if (body === null) return true;
-            const result = await tools.executeTool(body.tool, body.args);
-            reply(res, 200, result);
+            const requestId = typeof req.headers["x-hongtan-request-id"] === "string" ? req.headers["x-hongtan-request-id"] : null;
+            if (requestId) {
+                const replayed = replayGet(requestId);
+                if (replayed) {
+                    reply(res, 200, replayed);
+                    return true;
+                }
+            }
+            // 问题清单 1.1：整个等待期零字节写出正是触发 undici HeadersTimeoutError 的形态——
+            // 进入即预写头，执行期间每 10s 写一个空格（合法 JSON 前导空白，resp.json() 可解析）
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.flushHeaders?.();
+            const keepAlive = setInterval(() => {
+                if (!res.writableEnded) res.write(" ");
+            }, 10_000);
+            let result;
+            try {
+                result = await tools.executeTool(body.tool, body.args, { adapterFingerprint: adapterFingerprintFrom(req) });
+                if (requestId) replayPut(requestId, result);
+            } catch (e) {
+                logger.warn?.("[broker] 工具执行异常:", e?.message ?? e);
+                result = { ok: false, error: { code: "BROKER_ERROR", message: e?.message ?? String(e) } };
+            } finally {
+                clearInterval(keepAlive);
+            }
+            res.end(JSON.stringify(result));
             return true;
         }
         if (req.method === "POST" && url.pathname === "/v1/adapters/register") {

@@ -33,6 +33,12 @@ export const BROKER_ACTIVE_STATES = new Set([
 export const BROKER_INTERMEDIATE_STATES = new Set(["blocked_by_risk", "stalled_by_background", "interrupted"]);
 
 /**
+ * wait_for_task 的早退集合（问题清单 1.3）：终态或任一中间态都应立即返回，
+ * 不含 interrupted 会让 wait 在遮挡/心跳中断期间挂满整个 timeoutSec，撞上宿主 ≈60s 放弃线。
+ */
+export const WAIT_EARLY_RETURN_STATES = new Set([...BROKER_TERMINAL_STATES, ...BROKER_INTERMEDIATE_STATES]);
+
+/**
  * 孤儿判定窗口（§8.1：60s 无心跳 ⇒ orphaned）。
  *
  * Broker 与插件用的是同一套信息基础（插件的 heartbeatAt 也只由 crawl_progress 推进），
@@ -79,7 +85,9 @@ export function canBrokerTransition(from, to) {
     return BROKER_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
-const PROGRESS_HISTORY_CAP = 200;
+const PROGRESS_HISTORY_CAP = 500;
+/** progressSince 单次响应最多回传的条目数（控制 token；被截掉的计入 droppedCount） */
+const PROGRESS_RESPONSE_LIMIT = 40;
 
 export function createTaskStore({
     ledgerPath,
@@ -88,7 +96,7 @@ export function createTaskStore({
     ttlMs = 24 * 60 * 60 * 1000,
     logger = console,
     /**
-     * 任何可能改变「活跃任务数」的变更后回调。
+     * 任何可能改变「活跃任务数」的变更后回调（签名 (taskId)，sweep 等批量变更不带 id）。
      * 由 Broker 接到 keep-awake 协调上（§10.7 环①：任务运行期间阻止系统休眠）；
      * 挂在账本层而非各调用点，避免新增转移路径时漏掉协调。
      */
@@ -97,6 +105,22 @@ export function createTaskStore({
     /** @type {Map<string, any>} */
     const tasks = new Map();
     let seqCounter = 0;
+
+    /**
+     * 变更监听器注册表：供 wait_for_task 事件驱动（问题清单 1.1）等多方订阅，
+     * 与 DI 的 onChanged（keep-awake）互不干扰。回调签名 (taskId|undefined)。
+     */
+    const changeListeners = new Set();
+    function emitChange(taskId) {
+        onChanged?.(taskId);
+        for (const fn of changeListeners) {
+            try {
+                fn(taskId);
+            } catch (e) {
+                logger.warn?.("[broker] 任务变更监听器异常:", e?.message ?? e);
+            }
+        }
+    }
 
     function persist() {
         if (!ledgerPath) return;
@@ -151,7 +175,7 @@ export function createTaskStore({
         Object.assign(task, extra);
         task.updatedAt = now();
         persist();
-        onChanged?.();
+        emitChange(task.id);
         return true;
     }
 
@@ -173,7 +197,7 @@ export function createTaskStore({
         }
         if (removed > 0) {
             persist();
-            onChanged?.();
+            emitChange(undefined);
         }
         return removed;
     }
@@ -205,7 +229,7 @@ export function createTaskStore({
             };
             tasks.set(id, task);
             persist();
-            onChanged?.();
+            emitChange(task.id);
             return task;
         },
 
@@ -274,7 +298,7 @@ export function createTaskStore({
             task.summary = null;
             task.updatedAt = now();
             persist();
-            onChanged?.();
+            emitChange(taskId);
             return true;
         },
 
@@ -297,10 +321,14 @@ export function createTaskStore({
             }
             task.progressHistory.push({ seq, at: now(), data: data ?? null });
             if (task.progressHistory.length > PROGRESS_HISTORY_CAP) {
-                task.progressHistory.splice(0, task.progressHistory.length - PROGRESS_HISTORY_CAP);
+                const overflow = task.progressHistory.length - PROGRESS_HISTORY_CAP;
+                task.progressHistory.splice(0, overflow);
+                // 被环形裁掉的条数跨轮累计（问题清单 1.5）：progressSince 经 ringDroppedTotal 透出
+                task.droppedCount = (task.droppedCount ?? 0) + overflow;
             }
             task.updatedAt = now();
             persist();
+            emitChange(taskId);
             return true;
         },
 
@@ -320,6 +348,7 @@ export function createTaskStore({
             if (Number.isFinite(remaining)) task.remainingTarget = remaining;
             task.updatedAt = now();
             persist();
+            emitChange(taskId);
             return true;
         },
 
@@ -353,18 +382,56 @@ export function createTaskStore({
             };
         },
 
-        /** wait_for_task 的增量：seq > sinceSeq 的进度条目 + 当前 lastSeq */
+        /**
+         * wait_for_task / task_status 的增量：seq > sinceSeq 的进度条目 + 当前 lastSeq。
+         *
+         * 截断语义（问题清单 1.5）：历史环形裁剪与单次响应上限都可能让 AI 拿不到完整增量——
+         * `truncated: true`（游标落在已被裁掉的区间）、`droppedCount`（**单轮口径**：仅本轮
+         * 响应之外被省略的条数）与 `ringDroppedTotal`（环形裁剪的跨轮累计，诊断用）把
+         * 「静默丢增量」变成显式信号；条目输出为紧凑投影，落盘仍存原始 data。
+         */
         progressSince(taskId, sinceSeq) {
             const task = tasks.get(taskId);
-            if (!task) return { entries: [], lastSeq: 0 };
+            if (!task) {
+                return { entries: [], lastSeq: 0, firstAvailableSeq: 0, droppedCount: 0, ringDroppedTotal: 0, truncated: false };
+            }
+            const since = sinceSeq ?? 0;
+            const firstAvailableSeq = task.progressHistory[0]?.seq ?? 0;
+            const filtered = task.progressHistory.filter((e) => e.seq > since);
+            const omitted = Math.max(0, filtered.length - PROGRESS_RESPONSE_LIMIT);
+            const entries = filtered.slice(-PROGRESS_RESPONSE_LIMIT).map(compactProgressEntry);
             return {
-                entries: task.progressHistory.filter((e) => e.seq > (sinceSeq ?? 0)),
+                entries,
                 lastSeq: task.seq,
+                firstAvailableSeq,
+                droppedCount: omitted,
+                ringDroppedTotal: task.droppedCount ?? 0,
+                truncated: since < firstAvailableSeq,
             };
         },
 
         sweep,
         persist,
+        /** 订阅任务变更（wait 事件驱动等）；返回退订函数。回调签名 (taskId|undefined) */
+        addChangeListener(fn) {
+            changeListeners.add(fn);
+            return () => changeListeners.delete(fn);
+        },
         size: () => tasks.size,
+    };
+}
+
+/** progressHistory 条目的对外紧凑投影（控制响应体积；不改动落盘结构） */
+function compactProgressEntry(entry) {
+    const d = entry?.data ?? null;
+    return {
+        seq: entry?.seq ?? null,
+        at: entry?.at ?? null,
+        current: d?.current ?? null,
+        total: d?.total ?? null,
+        articles: d?.articles ?? null,
+        comments: d?.comments ?? null,
+        message: d?.message ?? null,
+        visibility: d?.visibility ?? null,
     };
 }

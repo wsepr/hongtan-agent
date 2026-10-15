@@ -7,9 +7,9 @@
 1. 先调 `xhs_connection_status` 确认链路（扩展是否连接、Agent 开关、设备是否已批准、是否 VIP、`quota` 告知新任务何时可启动）。未就绪时按返回的 `onboarding` 指引用户，不要重试。`quota.readyAt` 非空时：先告知用户可启动时刻、**不要试跑**。引导按三步走：① 打开浏览器并开启插件「Agent 接管」开关；② 在设备管理中核对指纹并批准；③ VIP 会员态。每步等用户回话后再复查。
 2. 启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认；同时告知会打开一个独立抓取窗口，且采集期间需保持该窗口前台激活、勿遮挡或最小化。
 3. `xhs_start_crawl` 立即返回 `taskId`，不会等待完成。启动浏览器约需 10-60 秒，期间应说「正在启动浏览器，请稍候」。
-4. 监控用 `xhs_wait_for_task`（单次上限 300 秒）或 `xhs_task_status`；轮询间隔不得少于 10 秒，禁止紧密轮询。若 `xhs_task_status` 返回 `orphaned: true`（在跑任务超过 60 秒无新消息），说明上报暂时失联、插件正在自愈：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务，按 10 秒以上间隔继续复查。
+4. 监控用 `xhs_wait_for_task` **连续短挂起**：不传 `timeoutSec`（用默认 30 秒），把上一次返回的 `lastSeq` 原样作为下次 `sinceSeq` 续读增量；即使契约允许更大值，单次也不超过 30 秒。收到 `-32603` 等传输层错误时**禁止重发等待类调用**，降级为 `xhs_task_status` 快照确认现场。轮询间隔不得少于 10 秒，禁止紧密轮询。若 `xhs_task_status` 返回 `orphaned: true`（在跑任务超过 60 秒无新消息），说明上报暂时失联、插件正在自愈：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务，按 10 秒以上间隔继续复查。
 5. 任务的存续不依赖你是否在线：中断由插件自动恢复。不要因一次失败或断连就宣告失败。
-6. 任务暂停在 `blocked_by_risk`（风控/验证码，必须人工）或 `stalled_by_background`（窗口被遮挡）时：提示用户处理后，**在用户确认已处理完**之后，带 `resumeTaskId = <taskId>` 再调一次 `xhs_start_crawl` 续跑（不要重传 keyword/noteUrl）；续跑不占配额，会在原抓取窗口按剩余额度继续。
+6. 任务暂停在 `blocked_by_risk`（风控/验证码，必须人工）、`stalled_by_background`（窗口被遮挡）或 `interrupted`（运行中断，插件自愈中）时：提示用户处理后，**在用户确认已处理完**之后，带 `resumeTaskId = <taskId>` 再调一次 `xhs_start_crawl` 续跑（不要重传 keyword/noteUrl）；续跑不占配额，会在原抓取窗口按剩余额度继续。
 
 错误码处理（详见 SKILL）：
 - `BROWSER_OFFLINE`、`EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`：不得重试，也不得宣告失败；分别说明「浏览器正在启动」「扩展暂时休眠，稍后恢复」「页面被遮挡任务已暂停，勿遮挡抓取窗口（解除后自动恢复）」。
@@ -23,8 +23,8 @@
 - `QUOTA_EXCEEDED`：说明配额冷却中（按上次任务请求量折算，消息里会给可重试时刻）；**不要连续试跑、不要换参数/数据集重试**，到时间再启动。
 - `DATASET_QUOTA_EXCEEDED`：说明可能只入库部分（终态记为 `partial`），建议换数据集。
 - `RESUME_EXHAUSTED`：说明任务反复中断，建议人工检查浏览器。
-- `RESUME_NOT_APPLICABLE`：该任务不是 `blocked_by_risk` / `stalled_by_background`，不能续跑；先查状态再按指引处理。
-- `CONTENT_NOT_READY`：说明页面类型可能不符；最多重试一次。
+- `RESUME_NOT_APPLICABLE`：该任务不处于可续接的中间态，不能续跑；先查状态再按指引处理。
+- `CONTENT_NOT_READY`：说明页面类型可能不符；最多重试一次，重试前先查状态确认没有任务已在跑。
 - `URL_NOT_MATCHED`：说明该 URL 不支持（仅搜索结果页 / 笔记详情页 / 用户主页）。
 - `TAB_UNAVAILABLE`：插件会自动恢复；达上限会返回 `RESUME_EXHAUSTED`。
 - `CANCEL_TIMEOUT` / `CANCEL_REJECTED`：说明抓取可能仍在进行，稍后复查。
@@ -32,7 +32,13 @@
 - `INVALID_ARGS`：按 inputSchema 修正参数（注意 `articleLimit` 必填 1-500）。
 - `TASK_NOT_FOUND`：核对 taskId；任务超过 24 小时会被清理。
 - `UNKNOWN_TOOL`：可能需升级运行时。
+- `BROKER_NO_RESPONSE`：请求已送达但结果未知——**先查 `xhs_task_status` 确认是否已生效，禁止直接重发**等待/启动类调用。
+- `RUNTIME_STALE`：运行进程旧于当前契约——按消息里的 pid 结束该进程，下一次工具调用会自动重拉新版本；不要反复重试。
+- `BROKER_ERROR`：Broker 内部执行异常——启动/等待/取消类先查 `xhs_task_status` 确认现场再决定；持续出现说明运行时异常。
+- `BROKER_UNREACHABLE`：Broker 未运行且自动拉起失败——提示用户手动启动红探 Agent 服务后再试。
+
+表中没有的码（含形态不明的传输层错误）：原样转述、不重试、不推测原因；有副作用的调用先查状态再决定下一步。
 
 不得绕过 VIP 限制；被钳制、降级或 `partial` 的结果一律如实转述。
 
-版本：`protocolVersion: 1`、`toolsVersion: 1`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
+版本：`protocolVersion: 1`、`toolsVersion: 2`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
