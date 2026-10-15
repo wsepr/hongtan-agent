@@ -1,25 +1,39 @@
 @echo off
-rem 红探 Agent launcher（Windows）
-rem 有 Node >= 22 → runtime-launch.mjs（先试受管运行时，否则回退本机 Node 跑同一份源码）
-rem 无 Node     → bootstrap-runtime.ps1（按 runtime.manifest.json 下载 + SHA-256 校验后执行）
+rem hongtan Agent launcher (Windows)
+rem Node >= 22 present -> runtime-launch.mjs (managed runtime first, else system Node)
+rem no usable Node     -> bootstrap-runtime.ps1 (download per runtime.manifest.json + SHA-256)
 setlocal
 
-where node >nul 2>nul
-if errorlevel 1 goto :noNode
-
-rem 主版本号必须是纯数字再参与 IF 比较：`node -v` 输出形如 v22.14.0，cmd 的 IF 在操作数
-rem 含点号时退化为字符串比较（实测 "9.11.1" LSS "22" 为假），Node ≤ 9 会被误判成「有 Node ≥ 22」，
-rem 于是免 Node 引导路径永不触发。故用 node 自身切出纯数字主版本，取不到即按无 Node 处理。
-for /f "delims=" %%i in ('node -p "process.versions.node.split('.')[0]" 2^>nul') do set NODEMAJOR=%%i
-if "%NODEMAJOR%"=="" goto :noNode
-if %NODEMAJOR% LSS 22 goto :noNode
+rem PATH may contain several node.exe: probing only the first `where node` hit misroutes to
+rem the no-Node bootstrap when the first one is < 22 but a newer one exists later. Iterate all
+rem candidates and pick the first with major >= 22. The major version must be a pure number
+rem before IF comparison: `node -v` prints v22.14.0 and cmd IF degrades to string comparison
+rem when an operand contains dots (measured: "9.11.1" LSS "22" is false), so Node <= 9 would
+rem be misread as "has Node >= 22". No parsable major version -> treat as no Node.
+set "NODEEXE="
+for /f "delims=" %%i in ('where node 2^>nul') do (
+    if not defined NODEEXE call :probe "%%~i"
+)
+if "%NODEEXE%"=="" goto :noNode
 
 set "SCRIPT_DIR=%~dp0"
-node "%SCRIPT_DIR%runtime-launch.mjs" %*
+"%NODEEXE%" "%SCRIPT_DIR%runtime-launch.mjs" %*
 exit /b %errorlevel%
 
+:probe
+rem usebackq + call prefix: cmd /c strips the outer quotes and breaks paths with spaces; call
+rem re-parses without applying that strip rule (verified with a spaced path). Also the '.'
+rem single quotes inside -p would cut the plain '...' command delimiter of for /f short, so the
+rem command must be delimited with backticks (usebackq).
+set "NODEMAJOR="
+for /f "usebackq delims=" %%j in (`call "%~1" -p "process.versions.node.split('.')[0]" 2^>nul`) do set "NODEMAJOR=%%j"
+if "%NODEMAJOR%"=="" goto :eof
+if %NODEMAJOR% LSS 22 goto :eof
+set "NODEEXE=%~1"
+goto :eof
+
 :noNode
-rem 免 Node 路径：PowerShell 5.1 可用即可，不需要 pwsh 7
+rem No-Node path: PowerShell 5.1 is enough, pwsh 7 not required
 set "SCRIPT_DIR=%~dp0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%bootstrap-runtime.ps1" -ChildArgs "%*"
 exit /b %errorlevel%

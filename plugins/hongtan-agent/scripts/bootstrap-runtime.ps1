@@ -1,8 +1,9 @@
 ﻿<#
   红探 Agent 免 Node 引导（Windows）——设计文档 §13「launcher」行 / 执行计划 S13。
 
-  职责：当本机没有 Node 时，按 `runtime.manifest.json` 下载 standalone 运行时、
+  职责：当本机没有可用 Node（< 22）时，按 `runtime.manifest.json` 下载 standalone 运行时、
   **校验 SHA-256 后才落地并执行**；校验不通过一律拒绝（绝不执行未校验字节）。
+  状态目录无清单时，先按接入包版本从发布地址自动获取清单（失败不阻断）。
 
   与 `runtime-launch.mjs` 的关系：
   - 本脚本是「无 Node」路径（纯 PowerShell 5.1 可用，不依赖 pwsh 7）；
@@ -32,6 +33,13 @@ try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
 
+# PS 5.1 在较老 Win10 构建上默认协议集不含 TLS 1.2，而 GitHub 发布地址强制 TLS 1.2+；
+# 不钉死会把「协议协商失败」误判成「发布产物有问题」
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol =
+        [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+} catch { }
+
 function Fail([string]$message, [int]$code) {
     # 不能用 Write-Error：$ErrorActionPreference = "Stop" 会让它以异常终止（退出码恒为 1），
     # 掩盖「下载失败=2 / 无清单=1」的区分。直接写 stderr 并显式 exit。
@@ -46,6 +54,20 @@ function Get-PlatformKey {
         "x86" { return "win32-ia32" }
         default { return "win32-x64" }
     }
+}
+
+function Get-ManifestSeedUrl {
+    # 版本取自接入包 plugin.json（本脚本在 plugins/hongtan-agent/scripts/ 下，包根是其父目录）；
+    # HONGTAN_AGENT_MANIFEST_SEED_URL 可显式覆盖（测试隔离 / 私有部署）。取不到版本则不做 seeding。
+    if ($env:HONGTAN_AGENT_MANIFEST_SEED_URL) { return $env:HONGTAN_AGENT_MANIFEST_SEED_URL }
+    try {
+        $pluginJsonPath = Join-Path $PSScriptRoot "..\.codebuddy-plugin\plugin.json"
+        $plugin = Get-Content -LiteralPath $pluginJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($plugin.version) {
+            return "https://github.com/wsepr/hongtan-agent/releases/download/v$($plugin.version)/runtime.manifest.json"
+        }
+    } catch { }
+    return ""
 }
 
 $runtimeOverride = $env:HONGTAN_AGENT_RUNTIME
@@ -67,7 +89,28 @@ if (-not $StateDir) {
 
 $manifestPath = Join-Path $StateDir "runtime.manifest.json"
 if (-not (Test-Path -LiteralPath $manifestPath)) {
-    Fail "本机未安装 Node.js，且未找到运行时清单 $manifestPath（请安装 Node 22+，或随接入包分发运行时清单）" 1
+    # 清单 seeding：状态目录无清单时按接入包版本从发布地址拉取（版本钉死防漂移）。
+    # 失败不阻断——落入下方无清单报错，与「无清单回退系统 Node」同语义。
+    $seedUrl = Get-ManifestSeedUrl
+    if ($seedUrl) {
+        try {
+            New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+            $part = "$manifestPath.part"
+            try {
+                Invoke-WebRequest -Uri $seedUrl -OutFile $part -UseBasicParsing
+                Move-Item -LiteralPath $part -Destination $manifestPath -Force
+                Write-Host "[hongtan-agent] 已从发布地址获取运行时清单"
+            } finally {
+                # 半截清单不能留给下次被当成有效文件
+                if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
+            }
+        } catch {
+            Write-Warning "[hongtan-agent] 运行时清单自动获取失败：$($_.Exception.Message)"
+        }
+    }
+}
+if (-not (Test-Path -LiteralPath $manifestPath)) {
+    Fail "未找到运行时清单 $manifestPath，且从发布地址自动获取失败（请安装 Node 22+ 走系统 Node 路径，或检查网络与发布产物是否就绪）" 1
 }
 
 try {

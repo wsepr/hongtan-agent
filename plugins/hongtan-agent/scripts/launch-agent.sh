@@ -5,11 +5,19 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if command -v node >/dev/null 2>&1; then
-    NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-    if [ "$NODE_MAJOR" -ge 22 ]; then
-        exec node "$SCRIPT_DIR/runtime-launch.mjs" "$@"
+node_major() {
+    "$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null
+}
+
+# PATH 上可能有多个 node：只探第一个，会在「首个 < 22 但后方还有 ≥22」时误走免 Node 路径。
+# type -ap 按查找顺序列出全部候选，取首个主版本 ≥ 22 的。
+while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    NODE_MAJOR="$(node_major "$candidate")" || continue
+    [ -n "$NODE_MAJOR" ] || continue
+    if [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null; then
+        exec "$candidate" "$SCRIPT_DIR/runtime-launch.mjs" "$@"
     fi
-fi
+done < <(type -ap node)
 
 exec bash "$SCRIPT_DIR/bootstrap-runtime.sh" "$@"

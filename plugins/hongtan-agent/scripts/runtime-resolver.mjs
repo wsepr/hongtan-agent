@@ -4,7 +4,7 @@
  * 目标：用户无需自装 Node —— launcher 按平台下载 standalone 运行时二进制，
  * **校验 SHA-256 后才落地并执行**；校验不通过一律拒绝（绝不执行未校验字节）。
  *
- * 形态契约（`<状态目录>/runtime.manifest.json`，由发布方生成、随接入包分发）：
+ * 形态契约（`<状态目录>/runtime.manifest.json`，由发布方在 Release 生成）：
  * ```json
  * {
  *   "version": "0.1.0",
@@ -13,6 +13,7 @@
  *   }
  * }
  * ```
+ * - 状态目录无清单时按 `manifestSeedUrl`（版本钉死的发布地址）自动获取并缓存；
  * - 二进制按「**单文件可执行**」约定（不含压缩包，故无需解包逻辑）；
  * - 未提供当前平台条目 → 回退调用方已有的系统 Node 路径（不阻断 PoC 期的 `node` 用法）。
  *
@@ -63,6 +64,8 @@ export function createRuntimeResolver({
     fetchImpl = globalThis.fetch,
     fsImpl = fsImplDefault,
     logger = console,
+    version = null,
+    manifestSeedUrl = null,
 } = {}) {
     const key = platformKey(platform, arch);
 
@@ -75,6 +78,32 @@ export function createRuntimeResolver({
             executable: path.basename(entry.executable),
             version: isNonEmptyString(manifest.version) ? manifest.version : null,
         };
+    }
+
+    /**
+     * 清单 seeding：状态目录无清单时从发布地址拉取（版本钉死，防漂移）。
+     * 写入走 .part + 原子 rename；失败抛错由调用方决定降级（非致命）。
+     */
+    async function seedManifest() {
+        const manifestPath = path.join(stateDir, RUNTIME_MANIFEST_NAME);
+        const response = await fetchImpl(manifestSeedUrl);
+        if (!response?.ok) {
+            throw new Error(`HTTP ${response?.status ?? "?"}`);
+        }
+        const text = await response.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            throw new Error("清单不是合法 JSON");
+        }
+        if (!parsed || typeof parsed !== "object" || typeof parsed.platforms !== "object") {
+            throw new Error("清单缺少 platforms 字段");
+        }
+        fsImpl.mkdirSync(stateDir, { recursive: true });
+        const part = `${manifestPath}.part`;
+        fsImpl.writeFileSync(part, text);
+        fsImpl.renameSync(part, manifestPath);
     }
 
     function managedPath(entry) {
@@ -142,7 +171,17 @@ export function createRuntimeResolver({
          *          | {ok: false, reason: string}}
          */
         async ensure() {
-            const manifest = readRuntimeManifest({ stateDir, fsImpl });
+            let manifest = readRuntimeManifest({ stateDir, fsImpl });
+            if (!manifest && manifestSeedUrl) {
+                try {
+                    await seedManifest();
+                    manifest = readRuntimeManifest({ stateDir, fsImpl });
+                    logger.info?.(`[agent] 已从发布地址获取运行时清单${version ? `（v${version}）` : ""}`);
+                } catch (e) {
+                    // seeding 失败不阻断：回退系统 Node（与无清单时同语义）
+                    logger.warn?.(`[agent] 运行时清单自动获取失败：${e?.message ?? String(e)}`);
+                }
+            }
             const entry = manifestEntry(manifest);
             if (!entry) {
                 return {

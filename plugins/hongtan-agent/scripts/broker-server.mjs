@@ -725,7 +725,11 @@ export function createBroker({
 // 单例启动（进程入口）
 // ====================================================================
 
-const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+// 直接运行判定：node 直跑本文件，或经 runtime-entry 以 broker 角色启动（standalone 产物里
+// argv[1] 无法与 import.meta.url 匹配，必须靠角色环境变量；见 runtime-entry.mjs 头注）
+const isDirectRun =
+    process.env.HONGTAN_AGENT_ROLE === "broker" ||
+    Boolean(process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]));
 
 if (isDirectRun) {
     // 单例：探测 /health 复用既有实例（EADDRINUSE 兜底退出）

@@ -19,7 +19,7 @@
    - `/v1/adapters/register` 要求 **ed25519 设备签名 + ±60s 时间窗**，防止未持钥进程冒充 Adapter；
    - `GET /health` 仅暴露连接在线状态、任务计数与版本，不含任务内容、不含凭证。
 2. **扩展身份认证为「插件批准 deviceId，Broker 持钥签名」**（D1 落地形态）。
-   - Broker 在 `%APPDATA%\红探 Agent\<host>\device-identity.json`（权限 0600）持有 ed25519 私钥；
+   - Broker 在 `%APPDATA%\红探 Agent\device-identity.json`（权限 0600）持有 ed25519 私钥；路径**不按宿主分目录**——多宿主共享同一份设备身份（同一 deviceId）是既定取舍：真正的门禁在插件侧的设备批准列表，共享身份意味着批准一次即可授权所有宿主；需要按宿主隔离时用 `HONGTAN_AGENT_STATE_DIR` 拆分状态目录；
    - 插件下发 `session.challenge`（nonce + 过期），Broker 签名应答，插件用 WebCrypto 验签；
    - 仅验签通过 **且 deviceId 在插件侧批准列表** 的设备，其 `task.start` / `sync.request` 才被接受。
 3. **WebSocket 连接可能来自非扩展来源**。接受并约束：

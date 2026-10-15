@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 红探 Agent 免 Node 引导（macOS/Linux）——设计文档 §13「launcher」行 / 执行计划 S13。
 #
-# 职责：当本机没有 Node 时，按 runtime.manifest.json 下载 standalone 运行时、
+# 职责：当本机没有可用 Node（< 22）时，按 runtime.manifest.json 下载 standalone 运行时、
 # 校验 SHA-256 后才落地并执行；校验不通过一律拒绝（绝不执行未校验字节）。
+# 状态目录无清单时，先按接入包版本从发布地址自动获取清单（失败不阻断）。
 #
 # 与 runtime-launch.mjs 的关系：有 Node 走 runtime-launch.mjs（同一份清单、同一套校验语义）；
 # 本脚本是「无 Node」路径。
@@ -75,6 +76,51 @@ print(value if isinstance(value, str) else "")
 PY
 }
 
+# 读接入包 plugin.json 字段（本脚本在 plugins/hongtan-agent/scripts/ 下，包根是其父目录）。
+# 与 json_field 同样优先 jq；两者都没有时返回空（seeding 尽力而为，不因缺工具改变退出码语义）
+plugin_json_field() {
+    local field="$1" py="" plugin_json
+    plugin_json="$(cd "$(dirname "$0")" && pwd)/../.codebuddy-plugin/plugin.json"
+    if [ ! -f "$plugin_json" ]; then
+        echo ""
+        return 0
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg f "$field" '.[$f] // ""' "$plugin_json"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then py=python3
+    elif command -v python >/dev/null 2>&1; then py=python
+    else
+        echo ""
+        return 0
+    fi
+    "$py" - "$plugin_json" "$field" <<'PY'
+import json, sys
+path, field = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    data = json.load(handle)
+value = data.get(field)
+print(value if isinstance(value, str) else "")
+PY
+}
+
+# 清单 seeding：状态目录无清单时按接入包版本从发布地址拉取（版本钉死防漂移）。
+# 失败静默——由无清单报错兜底，与「无清单回退系统 Node」同语义
+seed_manifest() {
+    local seed_url version
+    seed_url="${HONGTAN_AGENT_MANIFEST_SEED_URL:-}"
+    if [ -z "$seed_url" ]; then
+        version="$(plugin_json_field version)"
+        [ -n "$version" ] || return 1
+        seed_url="https://github.com/wsepr/hongtan-agent/releases/download/v${version}/runtime.manifest.json"
+    fi
+    mkdir -p "$STATE_DIR"
+    curl -fsSL "$seed_url" -o "$MANIFEST.part" || { rm -f "$MANIFEST.part"; return 1; }
+    mv -f "$MANIFEST.part" "$MANIFEST"
+    echo "[hongtan-agent] 已从发布地址获取运行时清单" >&2
+}
+
 if [ -n "${HONGTAN_AGENT_RUNTIME:-}" ]; then
     [ "$INSTALL_ONLY" = "1" ] && exit 0
     exec "$HONGTAN_AGENT_RUNTIME" ${CHILD_ARGS[@]+"${CHILD_ARGS[@]}"}
@@ -85,7 +131,8 @@ if [ -z "$STATE_DIR" ]; then
 fi
 
 MANIFEST="$STATE_DIR/runtime.manifest.json"
-[ -f "$MANIFEST" ] || fail "本机未安装 Node.js，且未找到运行时清单 $MANIFEST（请安装 Node 22+，或随接入包分发运行时清单）" 1
+[ -f "$MANIFEST" ] || seed_manifest || true
+[ -f "$MANIFEST" ] || fail "未找到运行时清单 $MANIFEST，且从发布地址自动获取失败（请安装 Node 22+ 走系统 Node 路径，或检查网络与发布产物是否就绪）" 1
 
 KEY="$(platform_key)"
 URL="$(json_field url)"

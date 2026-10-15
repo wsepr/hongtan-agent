@@ -8,6 +8,7 @@
  * 回退链（任一环节失败都不静默降级为"能跑就行"）：
  * 1. `HONGTAN_AGENT_RUNTIME`（运维显式指定，绕过清单）；
  * 2. `<状态目录>/runtime.manifest.json` 描述的受管二进制（下载后 SHA-256 校验通过才落地）；
+ *    状态目录无清单时先按版本钉死的发布地址自动获取（seeding，失败不阻断）；
  * 3. 系统 Node（PoC 期路径；无清单时即走此路）。
  *
  * 校验失败时回退的是「执行方式」，而非「跳过校验」：受管二进制校验失败时，本进程仍以系统 Node
@@ -15,16 +16,18 @@
  */
 
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { resolveStateDirectory } from "./device-identity.mjs";
 import { createRuntimeResolver } from "./runtime-resolver.mjs";
+import { AGENT_VERSION } from "./version.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function loadRuntimeEntry() {
-    await import(path.join(__dirname, "runtime-entry.mjs"));
+    // Windows 绝对路径不是合法 ESM import 说明符，必须转 file:// URL
+    await import(pathToFileURL(path.join(__dirname, "runtime-entry.mjs")));
 }
 
 async function main() {
@@ -34,7 +37,16 @@ async function main() {
         process.exit(exitCode ?? 1);
     }
 
-    const resolver = createRuntimeResolver({ stateDir: resolveStateDirectory() });
+    // 清单 seeding：状态目录无清单时从版本钉死的发布地址拉取（HONGTAN_AGENT_MANIFEST_SEED_URL
+    // 可覆盖——测试隔离与私有部署用；URL 随 AGENT_VERSION 变化，保证拿到对应版本的清单）
+    const manifestSeedUrl = process.env.HONGTAN_AGENT_MANIFEST_SEED_URL
+        ?? `https://github.com/wsepr/hongtan-agent/releases/download/v${AGENT_VERSION}/runtime.manifest.json`;
+
+    const resolver = createRuntimeResolver({
+        stateDir: resolveStateDirectory(),
+        version: AGENT_VERSION,
+        manifestSeedUrl,
+    });
     const resolved = await resolver.ensure();
     if (resolved.ok && resolved.source === "managed" && resolved.executable) {
         const child = spawnSync(resolved.executable, process.argv.slice(2), { stdio: "inherit" });

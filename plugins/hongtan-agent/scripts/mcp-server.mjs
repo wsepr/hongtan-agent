@@ -19,11 +19,12 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./broker-server.mjs";
 import { createBrokerLauncher } from "./broker-launcher.mjs";
 import { loadOrCreateDeviceIdentity } from "./device-identity.mjs";
+import { AGENT_VERSION } from "./version.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
 
-const SERVER_INFO = { name: "hongtan-agent", version: "0.1.0" };
+const SERVER_INFO = { name: "hongtan-agent", version: AGENT_VERSION };
 const BROKER_BASE = `http://127.0.0.1:${CONFIG.port}`;
 const brokerPath = path.join(__dirname, "broker-server.mjs");
 const contractsPath = path.join(__dirname, "../contracts/xhs-agent-tools-v1.json");
@@ -69,7 +70,14 @@ function probeHealth() {
 const launcher = createBrokerLauncher({
     probeHealth,
     spawnBroker: () => {
-        spawn(process.execPath, [brokerPath], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+        // 带角色环境变量：standalone 产物里 process.execPath 是编译后的 exe 本身，
+        // runtime-entry 靠 HONGTAN_AGENT_ROLE 分流；node 模式下该变量无副作用
+        spawn(process.execPath, [brokerPath], {
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+            env: { ...process.env, HONGTAN_AGENT_ROLE: "broker" },
+        }).unref();
     },
     logger: console,
 });

@@ -21,6 +21,7 @@ launcher 分两条入口（`launch-agent.cmd` / `.sh`）：**有 Node ≥ 22** �
      "platforms": { "win32-x64": { "url": "https://…/hongtan-agent.exe", "sha256": "<hex>", "executable": "hongtan-agent.exe" } } }
    ```
    平台键为 `<platform>-<arch>`（`win32-x64` / `darwin-arm64` / `linux-x64` …）。
+   状态目录无清单时，按接入包版本从版本钉死的发布地址自动获取并缓存（`HONGTAN_AGENT_MANIFEST_SEED_URL` 可覆盖，用于测试隔离或私有部署；失败不阻断，走系统 Node 回退）。
    已安装且 **SHA-256 匹配** → 复用；缺失 → 下载到 `runtime/<exe>.part` → 校验 → 原子 rename 落地并置可执行位；**校验失败即删除临时文件并拒绝安装**（不会执行未经校验的字节）。
    已安装但哈希不匹配（被篡改/损坏）→ 删除并重新下载。
 3. **系统 Node**：有 Node 但无清单/清单无当前平台条目时，用本机 Node ≥ 22 执行同一份源码。
@@ -34,7 +35,7 @@ launcher 分两条入口（`launch-agent.cmd` / `.sh`）：**有 Node ≥ 22** �
 | 启动日志出现「运行时自动安装失败：… SHA-256 校验失败」 | 下载源被污染或清单过期。核对 `runtime.manifest.json` 的 `sha256` 与发布产物；两者不一致时**不要**放宽校验，联系发布方更新清单 |
 | 需要临时用本机某份运行时排障 | 设 `HONGTAN_AGENT_RUNTIME=<可执行文件绝对路径>`（该路径不再校验哈希，属运维显式信任） |
 | 需要预装但不启动运行时 | `bootstrap-runtime.ps1 -InstallOnly` / `bootstrap-runtime.sh --install-only` |
-| 未装 Node 的机器 | 已支持：由引导脚本下载 + 校验 + 执行受管运行时。**前提是接入包内附运行时清单**（发布产物就绪前，清单缺失时脚本会明确报错并提示安装 Node） |
+| 未装 Node 的机器 | 已支持：引导脚本自动获取运行时清单（按接入包版本钉死的发布地址）→ 下载 + 校验 + 执行受管运行时；清单获取失败时如实报错（不断言本机 Node 状态），可检查网络或手动放置清单 |
 | bash 引导报「缺少 JSON 解析工具」 | 需 `jq` 或 `python3` 之一（仅用于读清单；免 Node 场景下用它替代 Node 解析 JSON） |
 
 ## 2. 启动与自愈
