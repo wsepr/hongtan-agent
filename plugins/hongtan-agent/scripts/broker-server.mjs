@@ -29,6 +29,8 @@ import { createOsProbes } from "./broker/browser/os-probes.mjs";
 import { loadOrCreateDeviceIdentity, resolveStateDirectory } from "./device-identity.mjs";
 import { createKeepAwake } from "./keep-awake.mjs";
 import { createAutostart } from "./autostart.mjs";
+// 静态 import 而非 fs 读取：standalone 产物（bun compile）不内嵌运行时 readFileSync 的文件
+import contractsJson from "../contracts/xhs-agent-tools-v1.json" with { type: "json" };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -725,11 +727,11 @@ export function createBroker({
 // 单例启动（进程入口）
 // ====================================================================
 
-// 直接运行判定：node 直跑本文件，或经 runtime-entry 以 broker 角色启动（standalone 产物里
-// argv[1] 无法与 import.meta.url 匹配，必须靠角色环境变量；见 runtime-entry.mjs 头注）
-const isDirectRun =
-    process.env.HONGTAN_AGENT_ROLE === "broker" ||
-    Boolean(process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]));
+// 直接运行判定：node 直跑本文件（import.meta.main），或经 runtime-entry/adapter 以 broker
+// 角色启动（standalone 产物里靠角色环境变量）。不能用 import.meta.url === argv[1] 判定：
+// Bun 编译产物里所有捆绑模块的 import.meta.url 都等于入口虚拟路径，会让 adapter 进程
+// 误入 broker 启动块（实测复现）
+const isDirectRun = import.meta.main || process.env.HONGTAN_AGENT_ROLE === "broker";
 
 if (isDirectRun) {
     // 单例：探测 /health 复用既有实例（EADDRINUSE 兜底退出）
@@ -742,7 +744,7 @@ if (isDirectRun) {
         process.exit(0);
     }
 
-    const contracts = JSON.parse(fs.readFileSync(path.join(__dirname, "../contracts/xhs-agent-tools-v1.json"), "utf8"));
+    const contracts = contractsJson;
     const identity = await loadOrCreateDeviceIdentity({ host: config.hostKey }).catch((e) => {
         console.error("[broker] 设备身份初始化失败:", e);
         return null;

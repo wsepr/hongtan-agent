@@ -20,6 +20,9 @@ import { loadConfig } from "./broker-server.mjs";
 import { createBrokerLauncher } from "./broker-launcher.mjs";
 import { loadOrCreateDeviceIdentity } from "./device-identity.mjs";
 import { AGENT_VERSION } from "./version.mjs";
+// 静态 import 而非 fs 读取：standalone 产物（bun compile）不内嵌运行时 readFileSync 的文件，
+// 只内嵌模块图里的资源；Node 侧 JSON import attributes 自 20.10 起稳定
+import contracts from "../contracts/xhs-agent-tools-v1.json" with { type: "json" };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG = loadConfig();
@@ -27,9 +30,6 @@ const CONFIG = loadConfig();
 const SERVER_INFO = { name: "hongtan-agent", version: AGENT_VERSION };
 const BROKER_BASE = `http://127.0.0.1:${CONFIG.port}`;
 const brokerPath = path.join(__dirname, "broker-server.mjs");
-const contractsPath = path.join(__dirname, "../contracts/xhs-agent-tools-v1.json");
-
-const contracts = JSON.parse(fs.readFileSync(contractsPath, "utf8"));
 const hostKey = process.env.HONGTAN_AGENT_HOST ?? "workbuddy";
 const displayName = process.env.HONGTAN_AGENT_DEVICE_NAME ?? `红探 Agent (${hostKey})`;
 
