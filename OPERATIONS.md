@@ -81,7 +81,7 @@ curl http://127.0.0.1:17373/health
 | `browser_recorded` / `browser_resolved` / `browser_launch` / `browser_spawn_error` / `browser_launch_error` | 浏览器拉起留痕（§10.7 安全边界） |
 | `adapter_registered` / `adapter_register_rejected` | Adapter 设备签名握手 |
 | `tool_call` | 工具调用（不含敏感参数） |
-| `quota_rejected` / `rate_limited` | 配额拒绝 / action 级限流 |
+| `quota_rejected` / `rate_limited` | 配额**预检**拒绝（Broker 按插件上报的快照拦截，带 `readyAt`/`reason`；判定与结算在插件侧，§10.5）/ action 级限流 |
 | `alert` | **告警事件**（`kind` 见下；已实现，落审计便于事后复盘） |
 | `task_resumed` | 用户确认后的显式续接（`xhs_start_crawl { resumeTaskId }`） |
 | `task_cancel_forced` | 插件明确「本机没有该任务」（`NO_ACTIVE_TASK` / `TASK_ID_MISMATCH`）→ 账本强制收敛为 `canceled`（脏状态清理） |

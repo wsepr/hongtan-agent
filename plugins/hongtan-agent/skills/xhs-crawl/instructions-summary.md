@@ -4,7 +4,7 @@
 
 红探（hongtan）是小红书评论采集插件。当用户请求实质涉及「采集/抓取小红书评论」「找客户数据」时，使用红探工具：
 
-1. 先调 `xhs_connection_status` 确认链路（扩展是否连接、Agent 开关、设备是否已批准、是否 VIP）。未就绪时按返回的 `onboarding` 指引用户，不要重试。引导按三步走：① 打开浏览器并开启插件「Agent 接管」开关；② 在设备管理中核对指纹并批准；③ VIP 会员态。每步等用户回话后再复查。
+1. 先调 `xhs_connection_status` 确认链路（扩展是否连接、Agent 开关、设备是否已批准、是否 VIP、`quota` 显示新任务何时可启动）。未就绪时按返回的 `onboarding` 指引用户，不要重试。引导按三步走：① 打开浏览器并开启插件「Agent 接管」开关；② 在设备管理中核对指纹并批准；③ VIP 会员态。每步等用户回话后再复查。
 2. 启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认；同时告知会打开一个独立抓取窗口，且采集期间需保持该窗口前台激活、勿遮挡或最小化。
 3. `xhs_start_crawl` 立即返回 `taskId`，不会等待完成。启动浏览器约需 10-60 秒，期间应说「正在启动浏览器，请稍候」。
 4. 监控用 `xhs_wait_for_task`（单次上限 300 秒）或 `xhs_task_status`；轮询间隔不得少于 10 秒，禁止紧密轮询。若 `xhs_task_status` 返回 `orphaned: true`（在跑任务超过 60 秒无新消息），说明上报暂时失联、插件正在自愈：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务，按 10 秒以上间隔继续复查。
@@ -20,7 +20,7 @@
 - `EXTENSION_UNAVAILABLE`：说明扩展可能未安装/被禁用，提示检查 `chrome://extensions`。
 - `PROTOCOL_VERSION_MISMATCH`：提示升级插件或 Agent 运行时。
 - `TASK_BUSY`：改用 `xhs_task_status` 查询现有任务，勿盲目启动。
-- `QUOTA_EXCEEDED`：说明配额限制（最小间隔 10 分钟），不要连续启动。
+- `QUOTA_EXCEEDED`：说明配额冷却中（按上次任务请求量折算），消息里会给可重试时刻；不要连续启动。
 - `DATASET_QUOTA_EXCEEDED`：说明可能只入库部分（终态记为 `partial`），建议换数据集。
 - `RESUME_EXHAUSTED`：说明任务反复中断，建议人工检查浏览器。
 - `RESUME_NOT_APPLICABLE`：该任务不是 `blocked_by_risk` / `stalled_by_background`，不能续跑；先查状态再按指引处理。

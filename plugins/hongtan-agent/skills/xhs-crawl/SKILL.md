@@ -22,6 +22,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
    - `extension.connected`（扩展是否已连上本机服务）
    - `extension.agentEnabled` / `extension.deviceApproved`（开关与设备批准）
    - `vip.isVip` 与 `vip.effectiveArticleLimit`（会员态与本次可用篇数上限）
+   - `quota`（任务节奏配额快照；`readyAt` 非空表示需等到该时刻才能启动新任务——先如实告知用户，不要试跑）
    - `onboarding`（未就绪时的具体指引）
 2. **互斥检查**：若 `activeTask` 非空，先用 `xhs_task_status` 查看它，不要再启动新任务（否则会得到 `TASK_BUSY`）。
 3. **数据集**：用 `xhs_list_datasets` 查看现有数据集；需要新建时用 `xhs_create_dataset`（按名幂等，重名不报错）。也可以在 `xhs_start_crawl` 里直接传 `datasetName` —— 不存在会自动创建。
@@ -93,7 +94,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 | `CANCEL_TIMEOUT` / `CANCEL_REJECTED` | 说明抓取可能仍在进行，稍后复查 |
 | `BLOCKED_BY_RISK` | 提示用户在浏览器中完成验证后**主动**告知你继续；用户确认后再用 `resumeTaskId` 续跑（§2.6）；**禁止自动重试** |
 | `STALLED_BY_BACKGROUND` | 转述「页面被遮挡，任务已暂停，请勿遮挡抓取窗口」；解除遮挡后自动恢复。**不要重试、不要判失败**；需要立即继续时可经用户确认后用 `resumeTaskId` 续跑 |
-| `QUOTA_EXCEEDED` | 说明配额限制（最小间隔 10 分钟 / 24 小时上限），不要连续启动 |
+| `QUOTA_EXCEEDED` | 说明配额冷却中（按上次任务采集的实际请求量折算，消息里会给可重试时刻），不要连续启动；到时间再按用户要求启动 |
 | `DATASET_QUOTA_EXCEEDED` | 说明可能只入库了部分（任务终态会记为 `partial`），建议换一个新数据集 |
 | `RESUME_EXHAUSTED` | 说明任务反复中断，建议用户人工检查浏览器环境 |
 | `RESUME_NOT_APPLICABLE` | 该任务不是 `blocked_by_risk` / `stalled_by_background`，不能续跑；先用 `xhs_task_status` 确认状态并按该状态指引处理 |
@@ -118,7 +119,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 ## 8. 行为约束
 
-- 不得连续无间隔启动任务（对应最小间隔 10 分钟与 24 小时任务上限的配额）。
+- 不得连续无间隔启动任务（配额为任务节奏冷却债：按上次任务请求量折算，24 小时内上限 96 次；查询 `xhs_connection_status` 的 `quota` 可知何时可启动）。
 - 不得绕过 VIP 限制（底层钳制在插件侧强制生效，绕过只会失败）。
 - 不得索要或调整风控敏感参数（速度因子等不暴露给 AI）。
 

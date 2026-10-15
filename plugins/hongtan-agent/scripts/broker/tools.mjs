@@ -6,7 +6,7 @@
  * - wait_for_task 长轮询（timeoutSec ≤ 300 + sinceSeq 增量）；
  * - cancel_task 走取消确认协议（30s 超时 → CANCEL_TIMEOUT，任务保持可恢复）。
  *
- * 全部依赖注入（session/taskStore/quota/browserManager/now/sleep），可单测。
+ * 全部依赖注入（session/taskStore/audit/browserManager/now/sleep），可单测。
  */
 
 import { validateAgainstSchema } from "./schema.mjs";
@@ -41,10 +41,21 @@ function isValidXhsNoteUrl(url) {
     }
 }
 
+/**
+ * 冷却中消息模板（与插件侧 `pacingGate.formatPacingMessage` 同一措辞）。
+ * 快照里的 readyAt 是绝对时刻，这里据此算出「建议 HH:MM 后再开始」，供 AI 如实转述。
+ */
+export function formatQuotaMessage(quotaInfo) {
+    const at = new Date(quotaInfo.readyAt);
+    const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+    const reason =
+        typeof quotaInfo.reason === "string" && quotaInfo.reason !== "" ? quotaInfo.reason : "上次任务请求量较大";
+    return `配额冷却中：${reason}，建议 ${hhmm} 后再开始`;
+}
+
 export function createToolExecutor({
     contracts,
     taskStore,
-    quota,
     audit,
     session,
     browserManager,
@@ -125,6 +136,9 @@ export function createToolExecutor({
                       effectiveArticleLimit: limit,
                   }
                 : null,
+            // 任务节奏配额快照（§10.5，插件侧权威；Broker 只透出预检缓存）：
+            // AI 可先查「何时可启动」，避免调了 start_crawl 才知道要等
+            quota: info?.quota ?? null,
             activeTask: active ? taskStore.snapshot(active) : null,
             onboarding: info?.onboarding ?? null,
         });
@@ -153,11 +167,12 @@ export function createToolExecutor({
             return err("TASK_BUSY", `已有任务在跑（taskId=${active.id}, state=${active.state}），请先用 xhs_task_status 查看`);
         }
 
-        // 3. 配额
-        const quotaResult = quota.checkAndRecord();
-        if (!quotaResult.ok) {
-            audit?.append("quota_rejected", { reason: quotaResult.message });
-            return err(quotaResult.reason, quotaResult.message);
+        // 3. 配额预检（§10.5）：读插件上报的配额快照做派发前拦截——未到可启动时刻直接拒绝、
+        //    不建任务（保住秒回 UX）。快照缺失（旧插件/扩展离线）时跳过，交给插件在派发时权威重判。
+        const quotaInfo = session.extensionInfo()?.quota ?? null;
+        if (quotaInfo && Number.isFinite(quotaInfo.readyAt) && quotaInfo.readyAt > now()) {
+            audit?.append("quota_rejected", { readyAt: quotaInfo.readyAt, reason: quotaInfo.reason ?? null });
+            return err("QUOTA_EXCEEDED", formatQuotaMessage(quotaInfo));
         }
 
         // 4. 建任务

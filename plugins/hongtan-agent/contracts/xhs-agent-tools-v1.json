@@ -101,8 +101,8 @@
             "retryable": false
         },
         "QUOTA_EXCEEDED": {
-            "message": "触发任务配额限制（最小间隔 / 24h 上限）",
-            "aiGuidance": "说明配额限制，不要连续启动任务；等间隔到期后再按用户要求启动。",
+            "message": "任务节奏配额冷却中（按上次任务请求量折算）",
+            "aiGuidance": "消息中会给出可重试的绝对时刻（如「建议 14:35 后再开始」，或 24 小时内任务数已达上限）；如实转述该时刻，不要连续启动、不要换成别的工具尝试绕过。",
             "retryable": false
         },
         "DATASET_QUOTA_EXCEEDED": {

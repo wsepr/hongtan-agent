@@ -4,7 +4,8 @@
  * 职责（设计文档 §5/§6/§10）：
  * - WebSocket 服务端（ws://127.0.0.1:17373/extension）：challenge/proof 配对 + hello + 心跳 + 命令白名单
  * - HTTP loopback：GET /health + POST /v1/mcp（工具执行）+ /v1/adapters/register|heartbeat
- * - 任务账本（24h TTL）+ 配额 + 审计日志 + 浏览器幂等拉起 + 任务期阻止休眠 + 开机自启
+ * - 任务账本（24h TTL）+ 审计日志 + 浏览器幂等拉起 + 任务期阻止休眠 + 开机自启
+ *   （任务节奏配额已下沉插件侧，Broker 只缓存插件上报的快照做派发前预检，§10.5）
  *
  * 运行：node scripts/broker-server.mjs（或经 mcp-server.mjs detached 拉起单例）
  * 配置：HONGTAN_AGENT_* 环境变量（见 CONFIG）
@@ -18,7 +19,6 @@ import { fileURLToPath } from "node:url";
 
 import { createLoopbackWebSocketServer } from "./websocket-server.mjs";
 import { createTaskStore, BROKER_INTERMEDIATE_STATES } from "./broker/task-store.mjs";
-import { createQuota } from "./broker/quota.mjs";
 import { createActionLimiter } from "./broker/rate-limit.mjs";
 import { createAlertMonitor } from "./broker/alerts.mjs";
 import { createAudit } from "./broker/audit.mjs";
@@ -48,8 +48,6 @@ export function loadConfig(env = process.env) {
         ledgerPath: path.join(stateDir, "tasks.json"),
         auditPath: path.join(stateDir, "audit.jsonl"),
         browserConfigPath: path.join(stateDir, "browser.json"),
-        minIntervalMs: Number(env.HONGTAN_AGENT_MIN_INTERVAL_MS ?? 10 * 60 * 1000),
-        maxTasks24h: Number(env.HONGTAN_AGENT_MAX_TASKS_24H ?? 24),
         extensionDeadlineMs: Number(env.HONGTAN_AGENT_EXTENSION_DEADLINE_MS ?? 90_000),
         hostKey: env.HONGTAN_AGENT_HOST ?? "workbuddy",
     };
@@ -90,7 +88,6 @@ export function createBroker({
         // 账本任何变更后重算保活（§10.7 环①）：挂在账本层，避免新增转移路径时漏掉
         onChanged: () => refreshKeepAwake(),
     });
-    const quota = createQuota({ now, minIntervalMs: config.minIntervalMs, maxPer24h: config.maxTasks24h });
     // action 级限流（§10.5）：默认按 contracts.limits.actionCallsPerMinute，未配置时 60 次/分钟/工具
     const actionLimiter =
         rateLimiter ??
@@ -108,7 +105,7 @@ export function createBroker({
         probes: effectiveProbes,
     });
 
-    /** @type {{peer: any, extId: string, version: string, browserFamily: string, agentEnabled: boolean, deviceApproved: boolean, device: any, vip: any, helloAt: number} | null} */
+    /** @type {{peer: any, extId: string, version: string, browserFamily: string, agentEnabled: boolean, deviceApproved: boolean, device: any, vip: any, quota: any, helloAt: number} | null} */
     let extensionSession = null;
     let extensionLastSeenAt = 0;
     /** @type {Map<string, {resolve: (r: any) => void, timer: any}>} */
@@ -166,6 +163,8 @@ export function createBroker({
                             }
                           : null,
                       vip: extensionSession.vip,
+                      // 任务节奏配额快照（§10.5，插件侧权威）——派发前预检与 connection_status 共用
+                      quota: extensionSession.quota ?? null,
                       onboarding: buildOnboardingHint(),
                   }
                 : { connected: false, onboarding: buildOnboardingHint() },
@@ -214,7 +213,6 @@ export function createBroker({
     const tools = createToolExecutor({
         contracts,
         taskStore,
-        quota,
         audit,
         session: sessionFacade,
         browserManager,
@@ -382,6 +380,9 @@ export function createBroker({
                 break;
             }
             case "task.result":
+                // 缓存插件上报的配额快照（终态结算后的最新值，§10.5）——放在 applyTaskResult
+                // 之前：该函数对未知/终态任务会早退，但快照缓存不应跟着被跳过
+                if (extensionSession && msg.quota) extensionSession.quota = msg.quota;
                 applyTaskResult(msg);
                 break;
             case "task.cancel.result": {
@@ -477,6 +478,7 @@ export function createBroker({
             deviceId: msg.deviceId ?? null,
             device: msg.pendingDevice ?? null,
             vip: msg.vip ?? null,
+            quota: msg.quota ?? null,
             helloAt: now(),
         };
         audit.append("hello_ok", {
@@ -703,7 +705,6 @@ export function createBroker({
         // 测试钩子
         _internals: {
             taskStore,
-            quota,
             audit,
             tools,
             pairing,
