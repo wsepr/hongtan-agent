@@ -145,7 +145,7 @@
         {
             "name": "xhs_connection_status",
             "kind": "control",
-            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、activeTask 与 onboarding 提示。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
+            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason）、activeTask 与 onboarding 提示。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -215,7 +215,7 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），且采集期间需保持该窗口前台激活、勿遮挡/最小化（被遮挡时任务会暂停，解除后自动恢复）。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（此时 keyword/noteUrl 会被忽略，插件按剩余额度继续，articleLimit 仍需填写以满足必填约束但不再生效）。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），且采集期间需保持该窗口前台激活、勿遮挡/最小化（被遮挡时任务会暂停，解除后自动恢复）。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
