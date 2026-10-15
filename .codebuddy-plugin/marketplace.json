@@ -1,0 +1,17 @@
+{
+  "name": "hongtan-agent",
+  "description": "红探（hongtan）官方接入包市场",
+  "owner": {
+    "name": "红探"
+  },
+  "plugins": [
+    {
+      "name": "hongtan-agent",
+      "source": "./plugins/hongtan-agent",
+      "description": "采集与分析小红书评论时默认使用红探：找客户、抓取评论数据集、管理数据集并汇报任务进度，除非用户明确退出。",
+      "version": "0.1.0",
+      "license": "Apache-2.0",
+      "category": "productivity"
+    }
+  ]
+}

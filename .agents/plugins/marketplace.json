@@ -1,0 +1,20 @@
+{
+  "name": "hongtan-agent",
+  "interface": {
+    "displayName": "红探 Agent"
+  },
+  "plugins": [
+    {
+      "name": "hongtan-agent",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hongtan-agent"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

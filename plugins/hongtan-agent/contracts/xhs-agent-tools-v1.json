@@ -1,0 +1,356 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "name": "hongtan-agent-tools",
+    "protocolVersion": 1,
+    "toolsVersion": 1,
+    "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。",
+    "limits": {
+        "articleLimitMax": 500,
+        "nonVipArticleLimit": 20,
+        "keywordMaxLength": 50,
+        "datasetNameMaxLength": 50,
+        "waitTimeoutSecMax": 300,
+        "startCrawlMinIntervalMs": 600000,
+        "taskCountPer24h": 24,
+        "actionCallsPerMinute": 60
+    },
+    "errorCodes": {
+        "AGENT_DISABLED": {
+            "message": "插件「Agent 接管」总开关为关",
+            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中开启；不要重试。",
+            "retryable": false
+        },
+        "DEVICE_NOT_APPROVED": {
+            "message": "设备未批准或已被撤销",
+            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中核对本机设备指纹并点击批准。",
+            "retryable": false
+        },
+        "BROWSER_OFFLINE": {
+            "message": "浏览器未运行，Broker 正在拉起",
+            "aiGuidance": "告知用户「正在启动浏览器，请稍候」，用 xhs_task_status 轮询跟进（间隔不少于 10 秒）。不要报错、不要重试、不要宣告失败；若机器关机/休眠则为物理上限，如实告知。",
+            "retryable": false
+        },
+        "EXTENSION_OFFLINE": {
+            "message": "浏览器在运行，但红探扩展未连接（休眠/重连中）",
+            "aiGuidance": "说明「抓取扩展暂时休眠，稍后即可恢复」，用 xhs_task_status 轮询（间隔不少于 10 秒）；禁止紧密重试。",
+            "retryable": false
+        },
+        "EXTENSION_UNAVAILABLE": {
+            "message": "拉起浏览器后扩展仍未连接",
+            "aiGuidance": "说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 chrome://extensions 与插件的 Agent 接管开关。",
+            "retryable": false
+        },
+        "PROTOCOL_VERSION_MISMATCH": {
+            "message": "协议版本不匹配",
+            "aiGuidance": "提示用户升级红探插件或红探 Agent 运行时。",
+            "retryable": false
+        },
+        "VIP_REQUIRED": {
+            "message": "AI 联动为 VIP 专属能力（非 VIP 或会员态无法确认）",
+            "aiGuidance": "如实说明「AI 联动为 VIP 功能」，引导用户开通会员或登录红探账号；不要重试。",
+            "retryable": false
+        },
+        "NOT_LOGGED_IN": {
+            "message": "小红书未登录（页面被重定向到登录页）",
+            "aiGuidance": "提示用户在浏览器中登录小红书后重试。",
+            "retryable": false
+        },
+        "LOGIN_WALL": {
+            "message": "小红书登录墙：页面可打开但未登录导致结果列表为空",
+            "aiGuidance": "提示用户在浏览器中登录小红书后重试。",
+            "retryable": false
+        },
+        "CONTENT_NOT_READY": {
+            "message": "页面内容脚本未就绪（超时或页面类型不符）",
+            "aiGuidance": "说明页面类型可能不符或被重定向；最多允许重试一次。",
+            "retryable": true
+        },
+        "URL_NOT_MATCHED": {
+            "message": "目标 URL 不在插件注入范围（仅支持搜索结果页 / 笔记详情页 / 用户主页）",
+            "aiGuidance": "说明该 URL 不受支持，请改用 keyword 搜索。",
+            "retryable": false
+        },
+        "TAB_UNAVAILABLE": {
+            "message": "抓取标签页已关闭或不可用",
+            "aiGuidance": "插件会自动恢复；若达到恢复上限将返回 RESUME_EXHAUSTED，届时建议人工检查浏览器。",
+            "retryable": false
+        },
+        "TASK_BUSY": {
+            "message": "已有抓取任务在进行",
+            "aiGuidance": "先用 xhs_task_status 查询当前任务，勿盲目启动新任务。",
+            "retryable": false
+        },
+        "CANCEL_TIMEOUT": {
+            "message": "取消确认超时，抓取可能仍在进行",
+            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。",
+            "retryable": true
+        },
+        "CANCEL_REJECTED": {
+            "message": "取消请求被插件拒绝",
+            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。",
+            "retryable": true
+        },
+        "BLOCKED_BY_RISK": {
+            "message": "触发风控 / 验证码 / 需人工处理",
+            "aiGuidance": "提示用户在浏览器中完成验证后，主动告知你继续；禁止自动重试。",
+            "retryable": false
+        },
+        "STALLED_BY_BACKGROUND": {
+            "message": "抓取窗口被遮挡或最小化，任务已暂停",
+            "aiGuidance": "转述「页面被遮挡，任务已暂停，请勿遮挡/最小化抓取窗口」；解除遮挡后自动恢复；这是中间态，不要重试、不要判失败。",
+            "retryable": false
+        },
+        "QUOTA_EXCEEDED": {
+            "message": "触发任务配额限制（最小间隔 / 24h 上限）",
+            "aiGuidance": "说明配额限制，不要连续启动任务；等间隔到期后再按用户要求启动。",
+            "retryable": false
+        },
+        "DATASET_QUOTA_EXCEEDED": {
+            "message": "数据集写入上限（VIP 500 篇）",
+            "aiGuidance": "说明可能只入库了部分，建议换一个新数据集。",
+            "retryable": false
+        },
+        "RESUME_EXHAUSTED": {
+            "message": "自动恢复次数已达上限",
+            "aiGuidance": "说明任务反复中断，建议用户人工检查浏览器环境。",
+            "retryable": false
+        },
+        "RESUME_NOT_APPLICABLE": {
+            "message": "该任务当前状态不支持续接",
+            "aiGuidance": "先用 xhs_task_status 确认状态：只有 blocked_by_risk / stalled_by_background 才可续接；其余情况按该状态的指引处理。",
+            "retryable": false
+        },
+        "RATE_LIMITED": {
+            "message": "操作过于频繁（限流）",
+            "aiGuidance": "说明操作过频，稍后重试。",
+            "retryable": true
+        },
+        "TASK_NOT_FOUND": {
+            "message": "任务不存在",
+            "aiGuidance": "核对 taskId 是否来自 xhs_start_crawl 的返回；任务可能已超过 24 小时被清理。",
+            "retryable": false
+        },
+        "INVALID_ARGS": {
+            "message": "参数校验失败",
+            "aiGuidance": "按工具 inputSchema 修正参数后重试（注意 articleLimit 必填）。",
+            "retryable": true
+        },
+        "UNKNOWN_TOOL": {
+            "message": "未知工具",
+            "aiGuidance": "用 xhs_connection_status 查看可用能力；工具列表可能需要升级运行时。",
+            "retryable": false
+        }
+    },
+    "tools": [
+        {
+            "name": "xhs_connection_status",
+            "kind": "control",
+            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、activeTask 与 onboarding 提示。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "xhs_list_datasets",
+            "kind": "sync",
+            "description": "列出红探插件中的数据集（名称、现有笔记数、已抓评论数），用于选择或确认抓取目标数据集。无参数。扩展离线时返回 EXTENSION_OFFLINE，稍后重查。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "xhs_create_dataset",
+            "kind": "sync",
+            "description": "在红探插件中新增数据集（按名幂等：重名时返回已存在数据集，不报错）。启动抓取时若用 datasetName 指定新数据集则无需先调用本工具。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "数据集名称（1-50 字符）"
+                    },
+                    "description": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "数据集描述（可选，最长 200 字符）"
+                    }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "xhs_rename_dataset",
+            "kind": "sync",
+            "description": "重命名数据集。datasetId 与 name 二选一用于定位数据集。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "datasetId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "数据集 ID（与 name 二选一）"
+                    },
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "数据集名称（与 datasetId 二选一）"
+                    },
+                    "newName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "新名称（1-50 字符）"
+                    }
+                },
+                "required": ["newName"]
+            }
+        },
+        {
+            "name": "xhs_start_crawl",
+            "kind": "async",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），且采集期间需保持该窗口前台激活、勿遮挡/最小化（被遮挡时任务会暂停，解除后自动恢复）。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（此时 keyword/noteUrl 会被忽略，插件按剩余额度继续，articleLimit 仍需填写以满足必填约束但不再生效）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "resumeTaskId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "续跑已暂停（blocked_by_risk / stalled_by_background）的任务 ID。填写后 keyword/noteUrl/articleLimit 均不再生效，插件从当前态继续抓取剩余额度。仅在用户确认已在浏览器中处理完风控/遮挡后使用。"
+                    },
+                    "keyword": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "小红书搜索关键词（与 noteUrl 二选一）"
+                    },
+                    "noteUrl": {
+                        "type": "string",
+                        "description": "笔记详情页 URL（与 keyword 二选一，仅支持 xiaohongshu.com 域内）"
+                    },
+                    "datasetName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "目标数据集名称；不存在则自动创建"
+                    },
+                    "articleLimit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "抓取笔记数量上限（必填，1-500；非 VIP 账号会被钳制到 20 并如实回传）"
+                    },
+                    "config": {
+                        "type": "object",
+                        "properties": {
+                            "commentLimit": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 1000,
+                                "description": "每篇笔记评论数上限（默认 100）"
+                            },
+                            "crawlMode": {
+                                "type": "string",
+                                "enum": ["standard", "smart"],
+                                "description": "抓取频率档位（默认 smart；智能档更保守，适合无人值守长跑）"
+                            },
+                            "crawlCommentImages": {
+                                "type": "boolean",
+                                "description": "是否抓取评论图片（VIP 专属，默认 false）"
+                            }
+                        },
+                        "required": []
+                    }
+                },
+                "required": ["articleLimit"]
+            }
+        },
+        {
+            "name": "xhs_task_status",
+            "kind": "sync",
+            "description": "查询任务快照（状态、进度、当前篇目、错误码、resumeCount、orphaned、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。orphaned=true 表示在跑任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行恢复或转终态）：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "xhs_start_crawl 返回的任务 ID"
+                    }
+                },
+                "required": ["taskId"]
+            }
+        },
+        {
+            "name": "xhs_task_list",
+            "kind": "sync",
+            "description": "查询最近任务列表（供用户回来后排障与复盘「我不在的时候发生了什么」）。可按 limit 截取条数，也可按 datasetId 只看某个数据集的任务（datasetId 是插件解析后的真实数据集 id，可从 xhs_list_datasets 或任务快照的 datasetId 字段获得；注意它不是 AI 传入 datasetName 的替代——重名/改名后按名字无法定位）。每条任务快照含 datasetId（未解析数据集的早期失败为 null）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "返回条数上限（默认 20）"
+                    },
+                    "datasetId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "只返回写入该数据集的任务（可选；取自 xhs_list_datasets 返回的 id 或任务快照的 datasetId）"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "xhs_wait_for_task",
+            "kind": "blocking",
+            "description": "阻塞等待任务达到「完成 / 失败 / 需人工介入 / 超时」后返回，按 sinceSeq 只回传进度增量。单次挂起上限 300 秒，超时返回当前快照（调用方可再次调用续等）。适合用户要求持续跟进时使用；不要为了数小时的任务反复紧密轮询。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "任务 ID"
+                    },
+                    "timeoutSec": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 300,
+                        "description": "最长等待秒数（默认 300）"
+                    },
+                    "sinceSeq": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "只回传 seq 大于该值的进度增量（上次调用返回的 lastSeq）"
+                    }
+                },
+                "required": ["taskId"]
+            }
+        },
+        {
+            "name": "xhs_cancel_task",
+            "kind": "sync",
+            "description": "取消进行中的抓取任务（走取消确认协议，30 秒超时兜底）。取消后如实向用户汇报已入库数量，不要谎报完成。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "任务 ID"
+                    }
+                },
+                "required": ["taskId"]
+            }
+        }
+    ]
+}

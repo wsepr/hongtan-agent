@@ -1,0 +1,127 @@
+---
+name: xhs-crawl
+description: 当用户的请求实质涉及「采集/抓取小红书评论」「找客户数据」「把小红书搜索结果或笔记的评论存到数据集」时，默认进入红探（hongtan / 红探插件）采集工作流，即使用户没有提到红探、插件或 MCP 工具。只有用户明确说不要用红探/不要调用工具/只用我提供的材料，或请求与小红书评论采集无关时，才不触发。
+---
+
+# 红探小红书评论采集工作流
+
+红探是一个小红书评论采集插件（Chrome 扩展）。你通过 MCP 工具控制它：启动/停止抓取、查询任务状态、管理数据集。
+
+**任务的存续不依赖你是否在线。** 中断由插件自动恢复，你只是指挥官与播报员。
+
+## 1. 触发与边界
+
+- **触发**：请求实质涉及「采集／抓取小红书评论」「找客户数据」「把某个关键词的笔记评论存下来」时，默认进入本工作流，即使用户没有点名红探。
+- **不触发**：普通寒暄；与小红书评论采集无关的任务；用户明确说「不要用红探／不要调用工具／只用我提供的材料」。
+
+## 2. 工具选用决策树
+
+严格按以下顺序执行，不要跳步：
+
+1. **`xhs_connection_status`** —— 先确认链路就绪。读取：
+   - `extension.connected`（扩展是否已连上本机服务）
+   - `extension.agentEnabled` / `extension.deviceApproved`（开关与设备批准）
+   - `vip.isVip` 与 `vip.effectiveArticleLimit`（会员态与本次可用篇数上限）
+   - `onboarding`（未就绪时的具体指引）
+2. **互斥检查**：若 `activeTask` 非空，先用 `xhs_task_status` 查看它，不要再启动新任务（否则会得到 `TASK_BUSY`）。
+3. **数据集**：用 `xhs_list_datasets` 查看现有数据集；需要新建时用 `xhs_create_dataset`（按名幂等，重名不报错）。也可以在 `xhs_start_crawl` 里直接传 `datasetName` —— 不存在会自动创建。
+4. **`xhs_start_crawl`** —— 启动抓取，立即返回 `taskId`（**不会等待完成**）。
+5. **汇报 task handle**，转入监控。
+
+## 2.5 接入引导（onboarding 三步状态机）
+
+`xhs_connection_status` 返回的 `onboarding` 是当前缺口的一句指引；链路未就绪时**按状态机对号入座**，不要自己发明步骤：
+
+| 步骤 | 判据 | 你要用户做的事 |
+|---|---|---|
+| ① 插件侧就绪 | `extension.connected === false` | 请用户打开安装了红探插件的浏览器，并在插件设置 →「Agent 接管」中打开总开关 |
+| ② 设备批准 | 已连接但 `extension.deviceApproved === false` | 请用户在插件设置 →「Agent 接管」→ 设备管理中核对本机指纹并点击批准（`pairing.fingerprint` 可复述给用户核对） |
+| ③ 会员态 | ①② 就绪但 `vip.isVip === false` | 如实说明「AI 联动为 VIP 功能」，引导开通会员或登录红探账号 |
+
+三步全绿才进入工具选用决策树的第 3 步。**每一步都等用户回话后再复查**，不要连续调用工具空转。
+
+## 2.6 暂停后的续跑（显式续接）
+
+任务有两种**中间态**（不是失败，也不是终态）：`blocked_by_risk`（风控/验证码/未登录，必须人工）与 `stalled_by_background`（抓取窗口被遮挡或最小化，解除遮挡通常会自动恢复）。
+
+用户处理完之后，**在用户明确确认「已处理完」之后**再续跑：
+
+1. `xhs_task_status` 确认该任务仍在 `blocked_by_risk` / `stalled_by_background`；
+2. 调 `xhs_start_crawl` 并传 `resumeTaskId = <该 taskId>`（**不要**重传 keyword/noteUrl，也不要换 taskId）；
+3. 插件从当前态继续抓剩余额度（剩余 = 原目标 − 该数据集已入库数），并在原抓取窗口里跑；
+4. 续跑后回到监控约定。
+
+续跑**不占任务配额**（它不是新任务）。若状态已不再是这两种中间态，会返回 `RESUME_NOT_APPLICABLE`——按该状态的指引处理，不要强行续跑。
+
+## 3. 确认协议（启动前必做）
+
+启动之前必须向用户复述并获确认：
+
+- 目标（关键词或笔记链接）
+- 数据集名
+- 数量上限（`articleLimit`）
+
+同时必须告知这两件事，缺一不可：
+
+- 该操作会**打开一个独立的抓取窗口**（不占用用户当前的页面），任务结束后可自行关闭；
+- 采集期间需**保持该抓取窗口前台激活、勿遮挡或最小化**——窗口被遮挡或最小化时任务会**暂停**（解除遮挡后自动恢复）。这不是失败，也不需要重试。
+
+## 4. 监控约定
+
+- 用 `xhs_wait_for_task` 阻塞等待（单次上限 300 秒），或按需 `xhs_task_status` 快照。
+- **轮询间隔不得少于 10 秒。** 禁止紧密轮询占住会话。
+- 若 `xhs_task_status` 返回 **`orphaned: true`**（在跑任务超过 60 秒没有新消息）：这不是失败，而是**上报侧暂时失联**，插件会自行恢复或转终态。如实转述「任务暂时失联，插件会自动恢复」，**不要宣告失败、不要重试、也不要另起一个任务**；继续按 ≥10 秒间隔复查。
+- 用户几小时后才回来问一句时：直接 `xhs_task_status` 看快照（任务在浏览器里自持运行），或用 `xhs_task_list` 复盘「我不在的时候发生了什么」。
+
+## 5. 失败排查映射（逐条）
+
+| 错误码 | 你应当做的 |
+|---|---|
+| `AGENT_DISABLED` | 提示用户在红探插件设置 →「Agent 接管」中开启；**不重试** |
+| `DEVICE_NOT_APPROVED` | 提示用户在插件设置 →「Agent 接管」→ 设备管理中核对指纹并批准 |
+| `BROWSER_OFFLINE` | 说明「正在启动浏览器，请稍候」；本机服务会自动拉起。**不要报错、不要重试、不要宣告失败**。若机器关机/休眠，如实说明这是物理上限 |
+| `EXTENSION_OFFLINE` | 说明「采集扩展暂时休眠，稍后即可恢复」；**禁止紧密重试**，稍后（≥10 秒）再查 |
+| `EXTENSION_UNAVAILABLE` | 说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 `chrome://extensions` |
+| `PROTOCOL_VERSION_MISMATCH` | 提示升级红探插件或红探 Agent 运行时 |
+| `VIP_REQUIRED` | 如实说明「AI 联动为 VIP 功能」，引导开通会员或登录红探账号；**不重试** |
+| `NOT_LOGGED_IN` | 提示用户在浏览器中登录小红书后重试 |
+| `LOGIN_WALL` | 现象是「页面能打开但结果列表为空」。提示用户登录小红书后重试 |
+| `CONTENT_NOT_READY` | 说明页面类型可能不符或被重定向；**最多允许重试一次** |
+| `URL_NOT_MATCHED` | 说明该 URL 不支持（仅支持搜索结果页 / 笔记详情页 / 用户主页） |
+| `TAB_UNAVAILABLE` | 插件会自动恢复；若达到恢复上限会返回 `RESUME_EXHAUSTED`，届时建议人工检查浏览器 |
+| `TASK_BUSY` | 先用 `xhs_task_status` 查询当前任务，勿盲目启动 |
+| `CANCEL_TIMEOUT` / `CANCEL_REJECTED` | 说明抓取可能仍在进行，稍后复查 |
+| `BLOCKED_BY_RISK` | 提示用户在浏览器中完成验证后**主动**告知你继续；用户确认后再用 `resumeTaskId` 续跑（§2.6）；**禁止自动重试** |
+| `STALLED_BY_BACKGROUND` | 转述「页面被遮挡，任务已暂停，请勿遮挡抓取窗口」；解除遮挡后自动恢复。**不要重试、不要判失败**；需要立即继续时可经用户确认后用 `resumeTaskId` 续跑 |
+| `QUOTA_EXCEEDED` | 说明配额限制（最小间隔 10 分钟 / 24 小时上限），不要连续启动 |
+| `DATASET_QUOTA_EXCEEDED` | 说明可能只入库了部分（任务终态会记为 `partial`），建议换一个新数据集 |
+| `RESUME_EXHAUSTED` | 说明任务反复中断，建议用户人工检查浏览器环境 |
+| `RESUME_NOT_APPLICABLE` | 该任务不是 `blocked_by_risk` / `stalled_by_background`，不能续跑；先用 `xhs_task_status` 确认状态并按该状态指引处理 |
+| `RATE_LIMITED` | 说明操作过频，稍后重试 |
+| `TASK_NOT_FOUND` | 核对 `taskId` 是否来自 `xhs_start_crawl` 的返回；任务超过 24 小时会被账本清理 |
+| `INVALID_ARGS` | 按工具 `inputSchema` 修正参数后重试（特别注意 `articleLimit` 必填、1-500） |
+| `UNKNOWN_TOOL` | 说明工具集可能需升级运行时；用 `xhs_connection_status` 查看当前可用能力 |
+
+**三条「不得重试，也不得宣告失败」**：`BROWSER_OFFLINE`、`EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`。
+**一条「必须人工」**：`BLOCKED_BY_RISK`。
+
+## 6. 自我边界（无人值守前提）
+
+- 你不在线时任务照常运行；中断由插件自动恢复（重建抓取窗口 + 跳过已抓笔记续跑）。
+- 因此你**不应**把「需要重试」当作己任，也**不应**因一次工具调用失败或连接断开就宣告任务失败。
+- 恢复额度口径是「原目标 − 该数据集已入库数」，所以最终入库数不会重复计算。
+
+## 7. VIP 与诚实汇报
+
+- 非 VIP 账号会被钳制（笔记数量上限 20、模式锁定标准档、不可抓评论图片）。启动响应里的 `effectiveConfig.clamped` / `clampReason` 会如实说明。
+- 被钳制、降级、`partial`（部分完成）的结果**一律如实转述**，不要按承诺数汇报，也不要承诺插件未达成的数量。
+
+## 8. 行为约束
+
+- 不得连续无间隔启动任务（对应最小间隔 10 分钟与 24 小时任务上限的配额）。
+- 不得绕过 VIP 限制（底层钳制在插件侧强制生效，绕过只会失败）。
+- 不得索要或调整风控敏感参数（速度因子等不暴露给 AI）。
+
+## 9. 版本对齐
+
+本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 1`、`protocolVersion: 1`）。
