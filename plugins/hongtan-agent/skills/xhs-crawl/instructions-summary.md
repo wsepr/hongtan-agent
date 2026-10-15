@@ -41,4 +41,4 @@
 
 不得绕过 VIP 限制；被钳制、降级或 `partial` 的结果一律如实转述。
 
-版本：`protocolVersion: 1`、`toolsVersion: 2`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
+版本：`protocolVersion: 1`、`toolsVersion: 3`（与 `contracts/xhs-agent-tools-v1.json` 联动）。

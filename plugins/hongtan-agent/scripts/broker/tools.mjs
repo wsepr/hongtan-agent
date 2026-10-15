@@ -3,7 +3,7 @@
  *
  * - 数据集类（list/create/rename）经 WS sync.request 透传到插件，离线返回 EXTENSION_OFFLINE；
  * - start_crawl 立即返回 task handle（慢路径在状态机里，M2 实证模式）；
- * - wait_for_task 长轮询（timeoutSec ≤ 300 + sinceSeq 增量）；
+ * - wait_for_task 短挂起（按 limits.waitHangSecMax 自钳，当前 30s + sinceSeq 增量）；
  * - cancel_task 走取消确认协议（30s 超时 → CANCEL_TIMEOUT，任务保持可恢复）。
  *
  * 全部依赖注入（session/taskStore/audit/browserManager/now/sleep），可单测。
@@ -77,7 +77,8 @@ export function createToolExecutor({
         waitPollIntervalMs: 500,
         cancelTimeoutMs: 30_000,
         extensionDeadlineMs: 90_000,
-        // waitHangSecMax（问题清单 1.1）：单次挂起必须远小于宿主 ≈60s 放弃线；旧名 waitTimeoutSecMax 留作别名一版
+        // waitHangSecMax（问题清单 1.1）：单次挂起必须远小于宿主 ≈60s 放弃线。
+        // 当前契约已无 waitTimeoutSecMax，别名分支只为仍在跑的旧出包兜底。
         maxWaitSec: limits.waitHangSecMax ?? limits.waitTimeoutSecMax ?? 300,
         ...config,
     };

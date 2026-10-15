@@ -152,4 +152,4 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 ## 9. 版本对齐
 
-本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 2`、`protocolVersion: 1`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
+本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 3`、`protocolVersion: 1`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
