@@ -124,7 +124,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 | `TASK_BUSY` | 先用 `xhs_task_status` 查询当前任务，勿盲目启动 |
 | `CANCEL_TIMEOUT` / `CANCEL_REJECTED` | 说明抓取可能仍在进行，稍后复查 |
 | `BLOCKED_BY_RISK` | 提示用户在浏览器中完成验证后**主动**告知你继续；用户确认后再用 `resumeTaskId` 续跑（§2.6）；**禁止自动重试** |
-| `STALLED_BY_BACKGROUND` | 转述「页面被遮挡，任务已暂停，请勿遮挡抓取窗口」；解除遮挡后自动恢复。**不要重试、不要判失败**；需要立即继续时可经用户确认后用 `resumeTaskId` 续跑 |
+| `STALLED_BY_BACKGROUND` | 转述「页面被遮挡，任务已暂停，请勿遮挡抓取窗口」；解除遮挡后自动恢复。**不要重试、不要判失败**；可调 `xhs_activate_window` 把抓取窗口拉回前台（一次为宜，会抢焦点；窗口已关闭时返回 activated=false，改走恢复链路）；需要立即继续时可经用户确认后用 `resumeTaskId` 续跑 |
 | `QUOTA_EXCEEDED` | 说明配额冷却中（按上次任务请求量折算，见 §2.7），消息里会给可重试时刻；**不要连续试跑、不要换参数/数据集重试**，到时间再按用户要求启动 |
 | `DATASET_QUOTA_EXCEEDED` | 说明可能只入库了部分（任务终态会记为 `partial`），建议换一个新数据集 |
 | `RESUME_EXHAUSTED` | 说明任务反复中断，建议用户人工检查浏览器环境 |
@@ -176,4 +176,4 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 ## 9. 版本对齐
 
-本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 6`、`protocolVersion: 1`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
+本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 7`、`protocolVersion: 1`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。

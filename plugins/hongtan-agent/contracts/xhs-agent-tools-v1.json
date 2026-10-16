@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 1,
-    "toolsVersion": 6,
+    "toolsVersion": 7,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -398,6 +398,16 @@
                 "required": [
                     "taskId"
                 ]
+            }
+        },
+        {
+            "name": "xhs_activate_window",
+            "kind": "sync",
+            "description": "把红探插件当前受管的抓取窗口拉回前台（窗口恢复 normal + focused，并激活抓取标签页）。用于 `stalled_by_background`（窗口被遮挡/最小化）时的主动补救。注意：会抢夺用户焦点——无人值守场景适用；有人在用电脑时先向用户确认。窗口已关闭或无受管窗口时返回 activated=false（此时应走恢复链路，而不是反复重试本工具）。扩展离线返回 EXTENSION_OFFLINE。无参数。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
             }
         }
     ]

@@ -12,7 +12,7 @@
 6. 任务暂停在 `blocked_by_risk`（风控/验证码，必须人工）、`stalled_by_background`（窗口被遮挡）或 `interrupted`（运行中断，插件自愈中）时：提示用户处理后，**在用户确认已处理完**之后，带 `resumeTaskId = <taskId>` 再调一次 `xhs_start_crawl` 续跑（不要重传 keyword/noteUrl）；续跑不占配额，会在原抓取窗口按剩余额度继续。
 
 错误码处理（详见 SKILL）：
-- `EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`：不得重试，也不得宣告失败；分别说明「扩展暂时休眠，稍后恢复」「页面被遮挡任务已暂停，勿遮挡抓取窗口（解除后自动恢复）」。
+- `EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`：不得重试，也不得宣告失败；分别说明「扩展暂时休眠，稍后恢复」「页面被遮挡任务已暂停，勿遮挡抓取窗口（解除后自动恢复）」。`STALLED_BY_BACKGROUND` 时可调 `xhs_activate_window` 把窗口拉回前台（一次为宜，会抢焦点；activated=false 表示窗口已关，走恢复链路）。
 - `BLOCKED_BY_RISK`：必须人工——提示用户在浏览器完成验证后主动告知继续；禁止自动重试。
 - `VIP_REQUIRED`：如实说明 AI 联动为 VIP 功能并引导开通/登录；不重试。
 - `AGENT_DISABLED`、`DEVICE_NOT_APPROVED`：引导用户在插件设置中开启开关 / 核对指纹并批准；不重试。
@@ -42,4 +42,4 @@
 
 不得绕过 VIP 限制；被钳制、降级或 `partial` 的结果一律如实转述。
 
-版本：`protocolVersion: 1`、`toolsVersion: 6`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
+版本：`protocolVersion: 1`、`toolsVersion: 7`（与 `contracts/xhs-agent-tools-v1.json` 联动）。

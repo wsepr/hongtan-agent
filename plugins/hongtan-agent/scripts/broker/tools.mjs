@@ -521,6 +521,8 @@ export function createToolExecutor({
                 return toolWaitForTask(args);
             case "xhs_cancel_task":
                 return toolCancelTask(args);
+            case "xhs_activate_window":
+                return syncRequest("window_activate", {});
             default:
                 return err("UNKNOWN_TOOL", `未知工具: ${tool}`);
         }
