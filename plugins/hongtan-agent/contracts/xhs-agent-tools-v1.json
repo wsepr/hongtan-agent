@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 1,
-    "toolsVersion": 3,
+    "toolsVersion": 5,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -22,11 +22,6 @@
         "DEVICE_NOT_APPROVED": {
             "message": "设备未批准或已被撤销",
             "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中核对本机设备指纹并点击批准。重复执行无意义，必须先完成人工批准。",
-            "retryable": false
-        },
-        "BROWSER_OFFLINE": {
-            "message": "浏览器未运行，Broker 正在拉起",
-            "aiGuidance": "告知用户「正在启动浏览器，请稍候」，用 xhs_task_status 轮询跟进（间隔不少于 10 秒）。不要报错、不要重试、不要宣告失败；若机器关机/休眠则为物理上限，如实告知。重复调用只是叠加等待，不会加速拉起。",
             "retryable": false
         },
         "EXTENSION_OFFLINE": {
@@ -238,7 +233,7 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），且采集期间需保持该窗口前台激活、勿遮挡/最小化（被遮挡时任务会暂停，解除后自动恢复）。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），且采集期间需保持该窗口前台激活、勿遮挡/最小化（被遮挡时任务会暂停，解除后自动恢复）。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -289,6 +284,20 @@
                             "crawlCommentImages": {
                                 "type": "boolean",
                                 "description": "是否抓取评论图片（VIP 专属，默认 false）"
+                            },
+                            "skipExistingArticles": {
+                                "type": "boolean",
+                                "description": "是否跳过数据集中已存在的笔记（默认 true，与插件配置界面一致）。跳过可避免重复抓取；续跑时插件强制为 true"
+                            },
+                            "autoExpandCommentReplies": {
+                                "type": "boolean",
+                                "description": "是否自动展开评论中的回复内容（默认 false，与插件配置界面一致）"
+                            },
+                            "commentExpandLimit": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 999,
+                                "description": "每条评论最多展开回复的次数（0 或缺省 = 不限制；仅当 autoExpandCommentReplies=true 时生效）"
                             }
                         },
                         "required": []

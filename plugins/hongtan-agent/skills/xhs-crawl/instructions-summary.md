@@ -4,15 +4,15 @@
 
 红探（hongtan）是小红书评论采集插件。当用户请求实质涉及「采集/抓取小红书评论」「找客户数据」时，使用红探工具：
 
-1. 先调 `xhs_connection_status` 确认链路（扩展是否连接、Agent 开关、设备是否已批准、是否 VIP、`quota` 告知新任务何时可启动）。未就绪时按返回的 `onboarding` 指引用户，不要重试。`quota.readyAt` 非空时：先告知用户可启动时刻、**不要试跑**。引导按三步走：① 打开浏览器并开启插件「Agent 接管」开关；② 在设备管理中核对指纹并批准；③ VIP 会员态。每步等用户回话后再复查。
-2. 启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认；同时告知会打开一个独立抓取窗口，且采集期间需保持该窗口前台激活、勿遮挡或最小化。
+1. 先调 `xhs_connection_status` 确认链路（扩展是否连接、Agent 开关、设备是否已批准、是否 VIP、`quota` 告知新任务何时可启动）。未就绪时**先分流**：`extension.connected === false` 且 `agentEnabled`/`deviceApproved` 均为 null（浏览器多半没开）→ 直接调 `xhs_start_crawl`，本机服务会自动拉起浏览器，**无需用户先开浏览器**；返回 `EXTENSION_UNAVAILABLE` 才转人工。浏览器开着但开关未开/设备未批准时按返回的 `onboarding` 指引用户，不要重试。`quota.readyAt` 非空时：先告知用户可启动时刻、**不要试跑**。人工引导按三步走：① 开启插件「Agent 接管」开关；② 在设备管理中核对指纹并批准；③ VIP 会员态。每步等用户回话后再复查。
+2. 启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认；同时告知会打开一个独立抓取窗口（抓取成功后自动收起，失败时保留供查看），且采集期间需保持该窗口前台激活、勿遮挡或最小化。config 可选参数与插件配置界面对齐：`skipExistingArticles`（跳过已存在笔记，默认 true）、`autoExpandCommentReplies`（自动展开评论回复，默认 false）、`commentExpandLimit`（每条最多展开次数 0-999，0=不限，仅展开开启时生效）、`commentLimit`（每篇评论上限，默认 100）、`crawlMode`（默认 smart）、`crawlCommentImages`（VIP 专属，默认 false）；用户有偏好时按其偏好传入并复述。
 3. `xhs_start_crawl` 立即返回 `taskId`，不会等待完成。启动浏览器约需 10-60 秒，期间应说「正在启动浏览器，请稍候」。
 4. 监控用 `xhs_wait_for_task` **连续短挂起**：不传 `timeoutSec`（用默认 30 秒），把上一次返回的 `lastSeq` 原样作为下次 `sinceSeq` 续读增量；即使契约允许更大值，单次也不超过 30 秒。收到 `-32603` 等传输层错误时**禁止重发等待类调用**，降级为 `xhs_task_status` 快照确认现场。轮询间隔不得少于 10 秒，禁止紧密轮询。若 `xhs_task_status` 返回 `orphaned: true`（在跑任务超过 60 秒无新消息），说明上报暂时失联、插件正在自愈：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务，按 10 秒以上间隔继续复查。
 5. 任务的存续不依赖你是否在线：中断由插件自动恢复。不要因一次失败或断连就宣告失败。
 6. 任务暂停在 `blocked_by_risk`（风控/验证码，必须人工）、`stalled_by_background`（窗口被遮挡）或 `interrupted`（运行中断，插件自愈中）时：提示用户处理后，**在用户确认已处理完**之后，带 `resumeTaskId = <taskId>` 再调一次 `xhs_start_crawl` 续跑（不要重传 keyword/noteUrl）；续跑不占配额，会在原抓取窗口按剩余额度继续。
 
 错误码处理（详见 SKILL）：
-- `BROWSER_OFFLINE`、`EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`：不得重试，也不得宣告失败；分别说明「浏览器正在启动」「扩展暂时休眠，稍后恢复」「页面被遮挡任务已暂停，勿遮挡抓取窗口（解除后自动恢复）」。
+- `EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`：不得重试，也不得宣告失败；分别说明「扩展暂时休眠，稍后恢复」「页面被遮挡任务已暂停，勿遮挡抓取窗口（解除后自动恢复）」。
 - `BLOCKED_BY_RISK`：必须人工——提示用户在浏览器完成验证后主动告知继续；禁止自动重试。
 - `VIP_REQUIRED`：如实说明 AI 联动为 VIP 功能并引导开通/登录；不重试。
 - `AGENT_DISABLED`、`DEVICE_NOT_APPROVED`：引导用户在插件设置中开启开关 / 核对指纹并批准；不重试。
@@ -41,4 +41,4 @@
 
 不得绕过 VIP 限制；被钳制、降级或 `partial` 的结果一律如实转述。
 
-版本：`protocolVersion: 1`、`toolsVersion: 3`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
+版本：`protocolVersion: 1`、`toolsVersion: 5`（与 `contracts/xhs-agent-tools-v1.json` 联动）。

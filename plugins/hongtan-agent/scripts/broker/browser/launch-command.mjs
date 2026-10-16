@@ -52,7 +52,9 @@ export function buildLaunchCommand({ resolvedExe, profileDir, url }) {
         return { ok: true, command: { file: "open", args } };
     }
 
-    const args = [`--profile-directory=${profileDir ?? "Default"}`];
+    // --start-maximized 仅冷启动生效（交接给已运行实例时被忽略）：提高冷启动窗口变大概率，
+    // 不解决 Windows 前台锁——前台化的主要保障仍是扩展连上后的 activateWindow
+    const args = [`--profile-directory=${profileDir ?? "Default"}`, "--start-maximized"];
     if (urlCheck.url) args.push(urlCheck.url);
     return { ok: true, command: { file: resolvedExe.exe, args } };
 }

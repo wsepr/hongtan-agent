@@ -27,19 +27,28 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 2. **互斥检查**：若 `activeTask` 非空，先用 `xhs_task_status` 查看它，不要再启动新任务（否则会得到 `TASK_BUSY`）。
 3. **数据集**：用 `xhs_list_datasets` 查看现有数据集；需要新建时用 `xhs_create_dataset`（按名幂等，重名不报错）。也可以在 `xhs_start_crawl` 里直接传 `datasetName` —— 不存在会自动创建。
 4. **`xhs_start_crawl`** —— 启动抓取，立即返回 `taskId`（**不会等待完成**）。
+   - **config 可选参数**（与插件配置界面同源，用户有偏好时按其偏好传入并在确认时复述）：
+     - `skipExistingArticles`：跳过数据集中已存在的笔记，**默认 true**——增量/补抓场景保持默认；用户明确要全量重抓（更新已有笔记）时传 false；
+     - `autoExpandCommentReplies`：自动展开评论中的回复内容，**默认 false**——用户要求抓完整回复楼/楼中楼时传 true；
+     - `commentExpandLimit`：每条评论最多展开次数（0-999，0=不限），仅当 `autoExpandCommentReplies=true` 时生效；
+     - 另有 `commentLimit`（每篇评论上限，默认 100）、`crawlMode`（默认 smart）、`crawlCommentImages`（VIP 专属，默认 false）。
+   - 速度因子等风控敏感参数不暴露（见 §8），不要索要或猜测。
 5. **汇报 task handle**，转入监控。
 
-## 2.5 接入引导（onboarding 三步状态机）
+## 2.5 接入引导（onboarding 分流：自动拉起 vs 人工）
 
-`xhs_connection_status` 返回的 `onboarding` 是当前缺口的一句指引；链路未就绪时**按状态机对号入座**，不要自己发明步骤：
+`xhs_connection_status` 返回的 `extension` 三态字段决定走自动还是人工——**先分流再行动**，不要把「断连」一律当成需要人工：
+
+- **自动路径**：`extension.connected === false` 且 `agentEnabled` / `deviceApproved` 均为 `null`（浏览器多半没开）→ **不必等用户回话**，直接进决策树第 4 步调 `xhs_start_crawl`，本机服务会自动拉起浏览器并等待扩展连接；仅当返回 `EXTENSION_UNAVAILABLE`（首次引导：扩展从未连接过、本机无从解析浏览器配置）才转人工路径。
+- **人工路径**（浏览器开着但未就绪，按下表对号入座，不要自己发明步骤）：
 
 | 步骤 | 判据 | 你要用户做的事 |
 |---|---|---|
-| ① 插件侧就绪 | `extension.connected === false` | 请用户打开安装了红探插件的浏览器，并在插件设置 →「Agent 接管」中打开总开关 |
-| ② 设备批准 | 已连接但 `extension.deviceApproved === false` | 请用户在插件设置 →「Agent 接管」→ 设备管理中核对本机指纹并点击批准（`pairing.fingerprint` 可复述给用户核对） |
+| ① 开关就绪 | `extension.agentEnabled === false` | 请用户在插件设置 →「Agent 接管」中打开总开关 |
+| ② 设备批准 | `extension.deviceApproved === false` | 请用户在插件设置 →「Agent 接管」→ 设备管理中核对本机指纹并点击批准（`pairing.fingerprint` 可复述给用户核对） |
 | ③ 会员态 | ①② 就绪但 `vip.isVip === false` | 如实说明「AI 联动为 VIP 功能」，引导开通会员或登录红探账号 |
 
-三步全绿才进入工具选用决策树的第 3 步。**每一步都等用户回话后再复查**，不要连续调用工具空转。
+人工路径**每一步都等用户回话后再复查**，不要连续调用工具空转；全绿后才进入工具选用决策树的第 3 步。
 
 ## 2.6 暂停后的续跑（显式续接）
 
@@ -73,12 +82,14 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 - 数据集名
 - 数量上限（`articleLimit`）
 
+若用户明确表达了「跳过已抓取/增量抓取」「展开回复楼」等偏好，将其映射为对应的 `config` 参数（§2 第 4 步）并在复述时一并说明；未表达时使用默认值，不必逐项追问。
+
 同时必须告知这两件事，缺一不可：
 
-- 该操作会**打开一个独立的抓取窗口**（不占用用户当前的页面），任务结束后可自行关闭；
+- 该操作会**打开一个独立的抓取窗口**（不占用用户当前的页面）；**抓取成功后本机会自动收起该窗口，失败/暂停时窗口保留**，方便查看错误现场；
 - 采集期间需**保持该抓取窗口前台激活、勿遮挡或最小化**——窗口被遮挡或最小化时任务会**暂停**（解除遮挡后自动恢复）。这不是失败，也不需要重试。
 
-另需预告一种现象，避免用户把闪退当独立故障：**抓取失败会关闭本次自建的窗口；若那是浏览器里唯一的窗口，浏览器会一起退出**——这是预期行为，不要把它当成新故障。
+另需预告一种现象，避免用户把闪退当独立故障：**抓取成功后本机会收起抓取窗口；若那是浏览器里唯一的窗口，浏览器会一起退出**——这是预期行为，不要把它当成新故障。
 
 ## 4. 监控约定
 
@@ -100,7 +111,6 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 |---|---|
 | `AGENT_DISABLED` | 提示用户在红探插件设置 →「Agent 接管」中开启；**不重试** |
 | `DEVICE_NOT_APPROVED` | 提示用户在插件设置 →「Agent 接管」→ 设备管理中核对指纹并批准 |
-| `BROWSER_OFFLINE` | 说明「正在启动浏览器，请稍候」；本机服务会自动拉起。**不要报错、不要重试、不要宣告失败**。若机器关机/休眠，如实说明这是物理上限 |
 | `EXTENSION_OFFLINE` | 说明「采集扩展暂时休眠，稍后即可恢复」；**禁止紧密重试**，稍后（≥10 秒）再查 |
 | `EXTENSION_UNAVAILABLE` | 说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 `chrome://extensions` |
 | `PROTOCOL_VERSION_MISMATCH` | 提示升级红探插件或红探 Agent 运行时 |
@@ -129,7 +139,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 **表中没有的码**（含形态不明的 `MCP error -32603` 等传输层错误）：⇒ **原样转述给用户、不重试、不推测原因**；若该调用有副作用（启动/等待/取消），先 `xhs_task_status` 查看是否已生效再决定下一步。
 
-**三条「不得重试，也不得宣告失败」**：`BROWSER_OFFLINE`、`EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`。
+**两条「不得重试，也不得宣告失败」**：`EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`。
 **一条「必须人工」**：`BLOCKED_BY_RISK`。
 
 ## 6. 自我边界（无人值守前提）
@@ -152,4 +162,4 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 ## 9. 版本对齐
 
-本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 3`、`protocolVersion: 1`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
+本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 5`、`protocolVersion: 1`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
