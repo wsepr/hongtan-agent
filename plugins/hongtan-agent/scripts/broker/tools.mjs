@@ -11,6 +11,7 @@
 
 import { validateAgainstSchema } from "./schema.mjs";
 import { BROKER_TERMINAL_STATES, BROKER_INTERMEDIATE_STATES, WAIT_EARLY_RETURN_STATES } from "./task-store.mjs";
+import { BROWSER_UNRESOLVABLE } from "./browser/resolve-exe.mjs";
 import { contractsFingerprint, resolveBuildId } from "../build-fingerprint.mjs";
 import { AGENT_VERSION } from "../version.mjs";
 
@@ -273,12 +274,27 @@ export function createToolExecutor({
             }
         } else {
             taskStore.setState(task, "launching_browser");
+            let launched = null;
             try {
                 // 拉起命令必须**携带该任务的深链 URL**（§9.1 步骤 6：等效于提前开窗，
                 // 扩展连上后 SW 按 URL 前缀定位该 tab；不携带则 SW 只能自行建窗）
-                browserManager?.ensureRunning({ url: buildTaskLaunchUrl(params), reason: "task-start" });
+                launched = browserManager?.ensureRunning({ url: buildTaskLaunchUrl(params), reason: "task-start" }) ?? null;
             } catch (e) {
                 logger.warn?.("[broker] 浏览器拉起失败:", e?.message ?? e);
+            }
+            if (launched?.ok === false && launched.code === BROWSER_UNRESOLVABLE) {
+                // 无法拉起（浏览器未安装/已卸载/路径漂移且重探失败）：等待不可能成功，立即归因失败（v2.10）。
+                // 「家族/extId 未记录」的失败不带 code，仍走下方等待——那是 hello 未达的合法竞态，
+                // 连上后 dispatchPendingTasks 会派发，快速失败会破坏它。
+                taskStore.setState(task, "failed", {
+                    error: { code: BROWSER_UNRESOLVABLE, message: `无法自动拉起浏览器：${launched.message ?? "浏览器配置不可解析"}` },
+                });
+                audit?.append("task_failed", { taskId: task.id, code: BROWSER_UNRESOLVABLE });
+                return ok({
+                    taskId: task.id,
+                    state: "failed",
+                    message: "浏览器无法自动拉起，请手动打开装有红探扩展的浏览器后重试",
+                });
             }
             taskStore.setState(task, "waiting_extension");
             audit?.append("task_wait_extension", {

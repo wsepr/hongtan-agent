@@ -18,6 +18,7 @@
 - `AGENT_DISABLED`、`DEVICE_NOT_APPROVED`：引导用户在插件设置中开启开关 / 核对指纹并批准；不重试。
 - `LOGIN_WALL`、`NOT_LOGGED_IN`：提示用户登录小红书后重试。
 - `EXTENSION_UNAVAILABLE`：说明扩展可能未安装/被禁用，提示检查 `chrome://extensions`。
+- `BROWSER_UNRESOLVABLE`：说明无法自动拉起浏览器（未安装/已卸载/路径漂移）。阶梯处理：只读定位浏览器 → 经宿主**非沙盒** shell 尝试启动（脱离式写法；**不得在沙盒中启动**——沙盒派生进程随沙盒销毁，WorkBuddy 实证）并**验证扩展已连上**（5~10s 后查 `xhs_connection_status`）→ 连上才重新调 `xhs_start_crawl` 新建任务；仅有沙盒 shell 或验证失败时，引导用户手动打开。
 - `PROTOCOL_VERSION_MISMATCH`：提示升级插件或 Agent 运行时。
 - `TASK_BUSY`：改用 `xhs_task_status` 查询现有任务，勿盲目启动。
 - `QUOTA_EXCEEDED`：说明配额冷却中（按上次任务请求量折算，消息里会给可重试时刻）；**不要连续试跑、不要换参数/数据集重试**，到时间再启动。
@@ -41,4 +42,4 @@
 
 不得绕过 VIP 限制；被钳制、降级或 `partial` 的结果一律如实转述。
 
-版本：`protocolVersion: 1`、`toolsVersion: 5`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
+版本：`protocolVersion: 1`、`toolsVersion: 6`（与 `contracts/xhs-agent-tools-v1.json` 联动）。

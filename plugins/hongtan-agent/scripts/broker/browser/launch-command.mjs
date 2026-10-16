@@ -32,7 +32,8 @@ export function validateLaunchUrl(url) {
 }
 
 /**
- * 构造拉起命令。
+ * 构造拉起命令。v2.10：profileDir 为 null/空 = 裸拉起——不带 --profile-directory，
+ * 浏览器按「最近使用的 profile」启动（unpacked 扩展场景 profile 反查失败的回退，§10.7 层 3）。
  * @returns {{ok: true, command: {file: string, args: string[]}} | {ok: false, message: string}}
  */
 export function buildLaunchCommand({ resolvedExe, profileDir, url }) {
@@ -43,10 +44,11 @@ export function buildLaunchCommand({ resolvedExe, profileDir, url }) {
     }
 
     if (resolvedExe.kind === "open-b") {
-        // macOS：open -b <bundleId> --args --profile-directory=... [url]
+        // macOS：open -b <bundleId> --args [--profile-directory=...] [url]
         // --args 仅冷启动生效；运行中场景走幂等开窗（由浏览器自身处理），不受影响
         const args = ["-b", resolvedExe.bundleId];
-        const innerArgs = [`--profile-directory=${profileDir ?? "Default"}`];
+        const innerArgs = [];
+        if (profileDir) innerArgs.push(`--profile-directory=${profileDir}`);
         if (urlCheck.url) innerArgs.push(urlCheck.url);
         args.push("--args", ...innerArgs);
         return { ok: true, command: { file: "open", args } };
@@ -54,7 +56,9 @@ export function buildLaunchCommand({ resolvedExe, profileDir, url }) {
 
     // --start-maximized 仅冷启动生效（交接给已运行实例时被忽略）：提高冷启动窗口变大概率，
     // 不解决 Windows 前台锁——前台化的主要保障仍是扩展连上后的 activateWindow
-    const args = [`--profile-directory=${profileDir ?? "Default"}`, "--start-maximized"];
+    const args = [];
+    if (profileDir) args.push(`--profile-directory=${profileDir}`);
+    args.push("--start-maximized");
     if (urlCheck.url) args.push(urlCheck.url);
     return { ok: true, command: { file: resolvedExe.exe, args } };
 }

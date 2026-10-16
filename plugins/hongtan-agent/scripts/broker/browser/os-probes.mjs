@@ -20,6 +20,7 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 /** App Paths 查询顺序：机器级（HKLM）→ 用户级（HKCU，per-user 安装落在这里）。
@@ -101,6 +102,20 @@ export function createOsProbes({ platform = process.platform, fsImpl = fs, execI
                     .sort();
             } catch {
                 return [];
+            }
+        },
+
+        /** 层 3 回退（v2.10）：读 Local State 的 profile.last_used——开发者模式「加载已解压的扩展程序」
+         *  不会在 Extensions/<extId> 下生成目录，精确反查必然失败；Local State 三平台均在 User Data 根下且对
+         *  unpacked 天然免疫。任何失败返回 null（文件缺失/损坏/字段缺失）。 */
+        readLocalStateLastUsed(userDataRoot) {
+            if (!userDataRoot) return null;
+            try {
+                const raw = fsImpl.readFileSync(path.join(userDataRoot, "Local State"), "utf8");
+                const used = JSON.parse(raw)?.profile?.last_used;
+                return typeof used === "string" && used ? used : null;
+            } catch {
+                return null;
             }
         },
     };

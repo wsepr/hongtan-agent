@@ -4,8 +4,8 @@
  * 硬性要求（M2 实证）：浏览器生命周期必须由 detached Broker 持有——宿主/工具会话
  * 派生的浏览器会随会话回收被整体终止（WS close=1006）。spawn detached + unref。
  *
- * 引导期固化（层 4）：扩展上报家族 → 解析 exe + 反查 profile → 写 browser.json；
- * 运行期只读配置零探测；spawn error 事件（路径漂移）触发一次性重探。
+ * 引导期固化（层 4）：扩展上报家族 → 解析 exe + profile 三层回退（精确反查 → last_used → 裸拉起，
+ * v2.10）→ 写 browser.json；运行期只读配置零探测；spawn error 事件（路径漂移）触发一次性重探。
  */
 
 import fs from "node:fs";
@@ -33,6 +33,7 @@ export function createBrowserManager({
         fileExists: probes.fileExists ?? ((p) => fsImpl.existsSync(p)),
         queryAppPath: probes.queryAppPath,
         queryDefaultBrowserCommand: probes.queryDefaultBrowserCommand,
+        lastUsedProfile: probes.lastUsedProfile,
     };
 
     function readConfig() {
@@ -54,7 +55,11 @@ export function createBrowserManager({
         }
     }
 
-    /** 引导期解析（层 2 exe + 层 3 profile） */
+    /** 引导期解析（层 2 exe + 层 3 profile）。v2.10：profile 反查改为三层回退——
+     *  Extensions/<extId> 精确反查（商店安装）→ Local State 的 profile.last_used（开发者模式 unpacked
+     *  扩展在 Extensions 下无目录，精确反查必然失败）→ 裸拉起（profileDir=null，不带
+     *  --profile-directory，浏览器按最近使用 profile 启动）。exe 解析失败仍是唯一硬失败
+     *  （BROWSER_UNRESOLVABLE）。 */
     function resolveAll({ family, extId }) {
         if (!isKnownFamily(family)) {
             return { ok: false, message: `未知浏览器家族: ${family}（扩展上报非法或 unknown）` };
@@ -69,10 +74,13 @@ export function createBrowserManager({
         });
         if (!exeResult.ok) return exeResult;
 
-        let profileResult = { ok: false, message: "未找到 User Data 根" };
+        let profileDir = null;
+        let profileSource = "bare-launch";
+        let userDataRoot = null;
+        let lastUsedHit = null;
         for (const root of userDataRootCandidates(family, platform, env)) {
             if (!joined.pathExists(root)) continue;
-            profileResult = resolveProfile({
+            const profileResult = resolveProfile({
                 userDataRoot: root,
                 extId,
                 joinPath: joined.joinPath,
@@ -80,11 +88,24 @@ export function createBrowserManager({
                 pathExists: joined.pathExists,
             });
             if (profileResult.ok) {
-                profileResult.userDataRoot = root;
+                profileDir = profileResult.profileDir;
+                profileSource = profileResult.source;
+                userDataRoot = root;
                 break;
             }
+            if (!lastUsedHit) {
+                const used = joined.lastUsedProfile?.(root) ?? null;
+                if (used && joined.pathExists(joined.joinPath(root, used))) {
+                    lastUsedHit = { profileDir: used, root };
+                }
+            }
         }
-        if (!profileResult.ok) return { ok: false, code: "PROFILE_UNRESOLVABLE", message: profileResult.message };
+        if (profileDir === null && lastUsedHit) {
+            profileDir = lastUsedHit.profileDir;
+            profileSource = "last-used";
+            userDataRoot = lastUsedHit.root;
+        }
+        audit?.append("browser_profile_resolved", { family, extId, profileDir, profileSource });
 
         return {
             ok: true,
@@ -95,8 +116,8 @@ export function createBrowserManager({
                 kind: exeResult.kind,
                 bundleId: exeResult.bundleId ?? null,
                 source: exeResult.source ?? null,
-                profileDir: profileResult.profileDir,
-                userDataRoot: profileResult.userDataRoot,
+                profileDir,
+                userDataRoot,
                 resolvedAt: now(),
             },
         };
@@ -116,20 +137,21 @@ export function createBrowserManager({
             return next;
         },
 
-        /** 引导期解析并固化配置（层 2/3/4）。成功后运行期零探测。 */
+        /** 引导期解析并固化配置（层 2/3/4）。成功后运行期零探测。
+         *  v2.10：profile 反查失败不再阻塞固化——exe 解析成功即固化（profileDir 可为 null = 裸拉起）。 */
         ensureResolved() {
             const config = readConfig();
             if (!config?.family || !config?.extId) {
                 return { ok: false, message: "浏览器家族/extId 未记录（等待扩展 hello）" };
             }
-            if (config.profileDir && (config.exe || config.kind === "open-b")) {
+            if ((config.exe || config.kind === "open-b") && (config.profileResolved || config.profileDir)) {
                 return { ok: true, config };
             }
             const resolved = resolveAll({ family: config.family, extId: config.extId });
             if (!resolved.ok) return resolved;
-            writeConfig({ ...config, ...resolved.config });
+            writeConfig({ ...config, ...resolved.config, profileResolved: true });
             audit?.append("browser_resolved", resolved.config);
-            return { ok: true, config: { ...config, ...resolved.config } };
+            return { ok: true, config: { ...config, ...resolved.config, profileResolved: true } };
         },
 
         /**
