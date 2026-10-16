@@ -277,8 +277,11 @@ export function createToolExecutor({
             let launched = null;
             try {
                 // 拉起命令必须**携带该任务的深链 URL**（§9.1 步骤 6：等效于提前开窗，
-                // 扩展连上后 SW 按 URL 前缀定位该 tab；不携带则 SW 只能自行建窗）
-                launched = browserManager?.ensureRunning({ url: buildTaskLaunchUrl(params), reason: "task-start" }) ?? null;
+                // 扩展连上后 SW 按 URL 前缀定位该 tab；不携带则 SW 只能自行建窗）。
+                // taskId 供 browserManager 的升级兜底按任务封顶（skip 后由它自调度 30s 升级）。
+                launched =
+                    browserManager?.ensureRunning({ url: buildTaskLaunchUrl(params), reason: "task-start", taskId: task.id }) ??
+                    null;
             } catch (e) {
                 logger.warn?.("[broker] 浏览器拉起失败:", e?.message ?? e);
             }

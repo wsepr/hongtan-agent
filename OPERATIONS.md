@@ -78,7 +78,7 @@ curl http://127.0.0.1:17373/health
 | `kicked_old` | 单扩展连接策略触发（连接风暴告警项） |
 | `session_proof_error` / `hello_reject` | 认证失败与版本拒绝 |
 | `task_created` / `task_dispatched` / `task_result` / `task_intermediate` / `task_resumed_running` / `task_recovered` / `task_readopted` / `task_cancel_*` | 任务全生命周期（`task_intermediate` 落中间态、`task_resumed_running` 表示插件报回 running 后账本同步回在跑、`task_readopted` 表示 Broker 重启的 `failed(BROKER_RESTARTED)` 占位被插件重播推翻） |
-| `browser_recorded` / `browser_resolved` / `browser_launch` / `browser_spawn_error` / `browser_launch_error` | 浏览器拉起留痕（§10.7 安全边界） |
+| `browser_recorded` / `browser_resolved` / `browser_resolve_pending` / `browser_profile_resolved` / `browser_launch` / `browser_launch_skipped` / `browser_launch_escalated` / `browser_launch_escalation_skipped` / `browser_spawn_error` / `browser_launch_error` | 浏览器拉起留痕（§10.7 安全边界；`browser_launch_skipped` = 吻痕/进程探测命中跳过（`reason: recent-contact \| process-running`），`browser_launch_escalated` = skip 30s 后强制拉起一次（每任务封顶），`browser_launch_escalation_skipped` = 到期已回连（`reason: contact-refreshed`）或无等待任务（`no-pending-task`）而不升级，见《常驻工作区设计方案》§5.2） |
 | `adapter_registered` / `adapter_register_rejected` | Adapter 设备签名握手 |
 | `tool_call` | 工具调用（不含敏感参数） |
 | `quota_rejected` / `rate_limited` | 配额**预检**拒绝（Broker 按插件上报的快照拦截，带 `readyAt`/`reason`；判定与结算在插件侧，§10.5）/ action 级限流 |

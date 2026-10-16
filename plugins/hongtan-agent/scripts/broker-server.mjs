@@ -105,6 +105,13 @@ export function createBroker({
         logger,
         now,
         probes: effectiveProbes,
+        // P2 前置判定（《常驻工作区设计方案》§5.2）：吻痕新鲜 / 进程探测命中 → skip spawn。
+        // 两处均为延迟执行闭包（变量声明见下方/上方，调用时才求值）
+        getExtensionLastSeenAt: () => extensionLastSeenAt,
+        shouldEscalate: () => {
+            const t = taskStore.activeTask();
+            return !!t && ["launching_browser", "waiting_extension"].includes(t.state);
+        },
     });
 
     /** @type {{peer: any, extId: string, version: string, browserFamily: string, agentEnabled: boolean, deviceApproved: boolean, device: any, vip: any, quota: any, helloAt: number} | null} */
@@ -126,7 +133,9 @@ export function createBroker({
 
     /**
      * 等待扩展连接的任务在 watchdog 中重试拉起浏览器（§10.7 环③「超时未连 → 尝试拉起 → 再等一轮」）。
-     * ensureRunning 自带 30s 防抖，故 1 分钟一轮不会造成拉起风暴。
+     * ensureRunning 自带 30s 防抖，故 1 分钟一轮不会造成拉起风暴；
+     * P2：前置判定（吻痕/进程探测）命中时 ensureRunning 会 skip 并由 browserManager 自调度 30s 升级，
+     * 此处的 taskId 用于升级的「每任务封顶一次」。
      */
     function retryLaunchForWaitingTasks() {
         if (sessionFacade.isConnected()) return;
@@ -137,6 +146,7 @@ export function createBroker({
             browserManager.ensureRunning({
                 url: buildTaskLaunchUrl(task.params),
                 reason: "waiting-extension-retry",
+                taskId: task.id,
             });
         } catch (e) {
             logger.warn?.("[broker] 重试拉起浏览器失败:", e?.message ?? e);

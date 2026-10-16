@@ -22,6 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { BROWSER_FAMILIES } from "./family-table.mjs";
 
 /** App Paths 查询顺序：机器级（HKLM）→ 用户级（HKCU，per-user 安装落在这里）。
  *  仅这两处，不额外猜 WOW6432Node 等镜像视图——设计文档 §10.7 层 2.1 只声明了 HKLM/HKCU。 */
@@ -90,6 +91,27 @@ export function createOsProbes({ platform = process.platform, fsImpl = fs, execI
         queryDefaultBrowserCommand(progId) {
             if (!progId) return null;
             return regQuery(`HKCR\\${progId}\\shell\\open\\command`);
+        },
+
+        /** 拉起前置判定（《常驻工作区设计方案》§5.2）：目标家族浏览器进程是否在运行。
+         *  win32 首发（tasklist）；darwin/linux 未实现一律 null——调用方按「探测不可用 → 照旧 spawn」回退。
+         *  注意假阳性面：Edge 后台/更新/crashpad 子进程也会命中映像名——本探测只作「暂缓拉起」信号，
+         *  由 browserManager 的 30s 升级定时器兜底（到期仍未回连才强制拉起）。 */
+        isBrowserProcessRunning(family) {
+            if (platform !== "win32") return null;
+            const exeName = BROWSER_FAMILIES[family]?.exeNames?.[0];
+            if (!exeName) return null;
+            try {
+                const result = execImpl("tasklist", ["/FI", `IMAGENAME eq ${exeName}`, "/NH"], {
+                    encoding: "utf8",
+                    windowsHide: true,
+                });
+                if (result?.error || result?.status !== 0) return null;
+                // 未运行时 tasklist 输出「信息: 没有运行的任务...」；按映像名出现与否判定（不依赖语言）
+                return String(result.stdout ?? "").includes(exeName);
+            } catch {
+                return null;
+            }
         },
 
         /** 层 3 兜底：枚举目录（只要目录名，与 resolve-profile 的口径一致）；排序保证判定可复现 */
