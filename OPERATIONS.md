@@ -118,7 +118,7 @@ curl http://127.0.0.1:17373/health
 | 工具返回 `EXTENSION_UNAVAILABLE` | 拉起浏览器 90s 后仍无连接。检查扩展是否安装/启用、设备是否已批准 |
 | 任务反复中断 | 看审计里 `task_recovered` 频次；自动恢复上限为 **3 次**，达上限转 `failed(RESUME_EXHAUSTED)`，需人工检查浏览器环境 |
 | 任务停在 `blocked_by_risk` | 风控/验证码/未登录，**不自动重试**。用户在浏览器处理完并确认后，带 `resumeTaskId` 再调一次 `xhs_start_crawl` 即可续跑（审计记 `task_resumed`） |
-| 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。解除遮挡即自动恢复；最小化由 `onBoundsChanged` + alarms 轮询自愈。也可经用户确认后用 `resumeTaskId` 立即续跑 |
+| 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。恢复窗口可见即自动继续；v2.12 起不再自动还原/抢焦点。用户在场时先征询再调 `xhs_activate_window` 拉回前台；也可经确认后用 `resumeTaskId` 续跑 |
 | 终态是 `partial` 且带 `DATASET_QUOTA_EXCEEDED` | 运行中数据集写入被 SW 防线拒绝（已达 500 篇上限）。结果如实汇报为部分完成；换一个数据集重跑 |
 | 工具返回 `RATE_LIMITED` | action 级限流触发（默认 60 次/分钟/工具）。等提示的秒数后重试；轮询间隔应 ≥10 秒 |
 | 工具返回 `BROKER_UNREACHABLE` / `BROKER_ERROR` | Broker 进程被杀或崩溃。adapter 会**自动重新拉起并重发该次调用**（连接类失败才重发，超时类不重发以免工具被执行两次）；若反复出现，按宿主 stderr 告警指引手动启动 `node scripts/broker-server.mjs` 并查看其输出 |
