@@ -21,6 +21,7 @@ import { createLoopbackWebSocketServer } from "./websocket-server.mjs";
 import { createTaskStore, BROKER_INTERMEDIATE_STATES } from "./broker/task-store.mjs";
 import { createActionLimiter } from "./broker/rate-limit.mjs";
 import { createAlertMonitor } from "./broker/alerts.mjs";
+import { createHandshakeBackoff, extIdFromOrigin } from "./broker/handshake-backoff.mjs";
 import { createAudit } from "./broker/audit.mjs";
 import { createPairing } from "./broker/pairing.mjs";
 import { createToolExecutor, buildTaskLaunchUrl } from "./broker/tools.mjs";
@@ -37,6 +38,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const BROKER_VERSION = "0.1.0";
 const BUILD_ID = resolveBuildId();
+
+/** 已知的旧协议 hello 形态（抓取实测到新形态就往这里加）：协议规定的是 `extension.hello` */
+const LEGACY_HELLO_TYPES = new Set(["hello"]);
 
 // ====================================================================
 // 配置
@@ -79,6 +83,10 @@ export function createBroker({
     // 探测函数，生产装配若不供给实现，App Paths、默认浏览器反查与目录枚举兜底在真实路径上
     // 全都不可达（只剩标准安装路径兜底）——测试自己注入桩，所以这条断链单测抓不到。
     const effectiveProbes = probes ?? createOsProbes();
+
+    // 抓取 + 硬化：协议外/旧协议客户端按来源退避（窗口 60s / 阈值 5 次 / 冷却 5 分钟），
+    // 冷却期内由 refuseUpgrade 在建立会话之前拒连
+    const handshakeBackoff = createHandshakeBackoff({ now });
 
     const audit = createAudit({ filePath: config.auditPath, now });
     // §11.6 告警监控：把「会静默自愈」的问题升级为可归因告警（离线超时 / 心跳停摆 / 恢复耗尽 / 连接风暴）
@@ -386,10 +394,41 @@ export function createBroker({
     // ------------------------------------------------------------------
 
     function handleExtensionMessage(peer, msg) {
+        // 「吻痕」只由**被识别并处理**的消息刷新。早期实现无差别地在函数入口刷新，于是任意进程都能
+        // 让它恒真——实测有客户端每 1–3s 发一帧裸 {type:"hello"}（从未完成握手），就足以让
+        // recentContact() 持续为真，静默抑制 broker 拉起**该拉起的**浏览器。
+        const beforeHello = !extensionSession || extensionSession.peer !== peer;
+        const recognized = msg.type === "session.challenge" || msg.type === "extension.hello" || msg.type === "session.proof.error";
+        // 抓取：把来源随每条留痕带上，否则「谁在反复握手失败」只能靠猜（origin/extId 由 onConnection 钉在 peer 上）
+        const peerTrace = { origin: peer?._origin ?? null, extId: peer?._extIdFromOrigin ?? null, remotePort: peer?._remotePort ?? null };
+
+        if (beforeHello && !recognized) {
+            // hello 前的其余消息一律忽略（白名单外不响应），也不计吻痕
+            audit.append("ws_message_before_hello", { type: msg?.type ?? "unknown", ...peerTrace });
+            // 硬化：已知旧协议形态 → 留痕 + 显式拒绝（回拒绝帧 + 专用 close 码），而不是静默忽略
+            if (LEGACY_HELLO_TYPES.has(msg?.type)) {
+                audit.append("legacy_hello_frame", { type: msg.type, ...peerTrace });
+                peer.send({
+                    type: "hello.rejected",
+                    reason: "LEGACY_PROTOCOL_UNSUPPORTED",
+                    expected: "extension.hello",
+                    protocolVersion: contracts?.protocolVersion ?? null,
+                    message: "本机 Agent 仅接受 extension.hello 握手，请更新扩展",
+                });
+                audit.append("hello_reject", { reason: "LEGACY_PROTOCOL_UNSUPPORTED", got: msg.type, ...peerTrace });
+                // 已给出明确信号，别让 5s 超时再补一条重复留痕
+                peer._setHelloSeen?.();
+                if (handshakeBackoff.noteFailure(peerTrace.extId)) {
+                    alerts.noteLegacyProtocolClient({ extId: peerTrace.extId, origin: peerTrace.origin });
+                }
+                peer.close(4003, "legacy protocol");
+            }
+            return;
+        }
         extensionLastSeenAt = now();
 
         // 未完成 hello：仅接受 challenge/proof 与 hello
-        if (!extensionSession || extensionSession.peer !== peer) {
+        if (beforeHello) {
             if (msg.type === "session.challenge") {
                 // extId 参与 proof 签名载荷（与插件侧 verifyProof 的 extId 同源），缺失按空串签名
                 const proof = pairing.respondToChallenge(msg, typeof msg.extId === "string" ? msg.extId : "");
@@ -400,12 +439,7 @@ export function createBroker({
                 handleHello(peer, msg);
                 return;
             }
-            if (msg.type === "session.proof.error") {
-                audit.append("session_proof_error", { code: msg.code, message: msg.message });
-                return;
-            }
-            // hello 前的其余消息一律忽略（白名单外不响应）
-            audit.append("ws_message_before_hello", { type: msg?.type ?? "unknown" });
+            audit.append("session_proof_error", { code: msg.code, message: msg.message });
             return;
         }
 
@@ -720,13 +754,31 @@ export function createBroker({
                 path: "/extension",
                 serviceName: "hongtan-agent-broker",
                 now,
+                // 抓取 + 硬化：退避冷却期内直接拒绝升级（建立会话前就挡住，否则 churn 依旧）
+                // 状态码固定 429（服务端硬编码）：拒的是「请求过多」而非认证/业务校验，别与 401/400 语义混用
+                refuseUpgrade: (request) => {
+                    const extId = extIdFromOrigin(request?.headers?.origin);
+                    return handshakeBackoff.isBlocked(extId) ? { reason: "legacy-client-cooldown", retryAfterSec: 60 } : null;
+                },
                 onHttpRequest: handleHttpRequest,
-                onConnection: (peer) => {
-                    audit.append("ws_open", {});
+                onConnection: (peer, request) => {
+                    // 抓取：把来源钉在连接上，供所有审计与退避复用（Origin 与端口都取自 request，无需额外系统调用）
+                    peer._origin = String(request?.headers?.origin ?? "");
+                    peer._remotePort = request?.socket?.remotePort ?? null;
+                    peer._extIdFromOrigin = extIdFromOrigin(peer._origin);
+                    audit.append("ws_open", { origin: peer._origin, remotePort: peer._remotePort });
                     let helloSeen = false;
                     const helloDeadline = setTimeout(() => {
                         if (!helloSeen) {
-                            audit.append("hello_reject", { reason: "5s 内未收到 hello" });
+                            audit.append("hello_reject", {
+                                reason: "5s 内未收到 hello",
+                                origin: peer._origin,
+                                extId: peer._extIdFromOrigin,
+                                remotePort: peer._remotePort,
+                            });
+                            if (handshakeBackoff.noteFailure(peer._extIdFromOrigin)) {
+                                alerts.noteLegacyProtocolClient({ extId: peer._extIdFromOrigin, origin: peer._origin });
+                            }
                             peer.close(4001, "hello timeout");
                         }
                     }, 5_000);

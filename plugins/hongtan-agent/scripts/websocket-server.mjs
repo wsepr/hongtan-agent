@@ -169,6 +169,7 @@ export function createLoopbackWebSocketServer({
     onConnection,
     onMessage,
     onClose,
+    refuseUpgrade,
     logger = console,
     now = () => Date.now(),
 } = {}) {
@@ -218,6 +219,25 @@ export function createLoopbackWebSocketServer({
             return;
         }
         if (!isAllowedWebSocketOrigin(request.headers.origin)) {
+            socket.destroy();
+            return;
+        }
+        // 抓取 + 硬化：退避冷却期内必须在建立会话之前拒连，否则「每 1–3s 连一次」的 churn 依旧存在。
+        // 以 HTTP 429 表达（升级前本就是 HTTP 语义），未提供钩子时零影响。
+        const refusal = refuseUpgrade?.(request);
+        if (refusal) {
+            const body = JSON.stringify({ ok: false, error: refusal.reason ?? "upgrade_refused" });
+            socket.write(
+                [
+                    "HTTP/1.1 429 Too Many Requests",
+                    "Connection: close",
+                    `Retry-After: ${refusal.retryAfterSec ?? 60}`,
+                    "content-type: application/json",
+                    `content-length: ${Buffer.byteLength(body)}`,
+                    "",
+                    body,
+                ].join("\r\n")
+            );
             socket.destroy();
             return;
         }

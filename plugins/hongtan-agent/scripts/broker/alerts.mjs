@@ -59,6 +59,11 @@ export function createAlertMonitor({ now = () => Date.now(), audit, logger = con
                 kickedOldAt = []; // 告警后重新计数：持续风暴按窗口重复告警，而不是每来一次刷一条
             }
         },
+        /** 协议外/旧协议客户端在窗口内反复握手失败达阈值。
+         *  窗口与阈值的判定在 `handshake-backoff.mjs`（避免告警器同时承担限流状态），这里只负责 emit。 */
+        noteLegacyProtocolClient({ extId = null, origin = null } = {}) {
+            emit("legacy_client_storm", { extId, origin });
+        },
         /** 任务进入终态（从 stall 告警集合里摘除，避免同一 taskId 复用场景误报） */
         noteTaskSettled(taskId) {
             alertedStalled.delete(taskId);

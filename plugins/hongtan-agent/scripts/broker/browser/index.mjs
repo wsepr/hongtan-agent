@@ -19,6 +19,7 @@ import { isKnownFamily, userDataRootCandidates } from "./family-table.mjs";
 import { resolveExe } from "./resolve-exe.mjs";
 import { resolveProfile } from "./resolve-profile.mjs";
 import { buildLaunchCommand, LAUNCH_DEBOUNCE_MS } from "./launch-command.mjs";
+import { mergeChildEnvironment } from "./child-env.mjs";
 
 /** 扩展「最近吻痕」窗口：≤60s 时跳过无谓拉起（WS 刚断的典型场景，alarms 会在 ≤30s 内重连） */
 const RECENT_CONTACT_MS = 60_000;
@@ -51,7 +52,9 @@ export function createBrowserManager({
         queryAppPath: probes.queryAppPath,
         queryDefaultBrowserCommand: probes.queryDefaultBrowserCommand,
         lastUsedProfile: probes.lastUsedProfile,
-        // 注意：probes 是白名单合入——新探针不加进这里在真实装配中永远不可达（lastUsedProfile 断链先例）
+        readSystemEnvironment: probes.readSystemEnvironment,
+        // 注意：probes 是白名单合入——新探针不加进这里在真实装配中永远不可达；
+        // 这里的键名还必须与 createOsProbes 的方法名逐字一致（曾因两处命名不同，last-used 回退在生产静默失效，单测因注入桩而抓不到）
         isBrowserProcessRunning: probes.isBrowserProcessRunning,
     };
 
@@ -199,8 +202,21 @@ export function createBrowserManager({
             return command;
         }
 
+        // v2.11：Broker 自身由宿主以精简环境启动，不传 env 会让浏览器继承这份残缺环境块。
+        // 实测仅缺 ProgramFiles(x86) 一项，Edge 就会在启动约 10s 后认定 profile 不可信并清空
+        // extensions.settings / 受保护顶层键 / Extensions 目录（手动打开正常 = explorer 给的是完整环境）。
+        const childEnv = mergeChildEnvironment({
+            baseEnv: env,
+            systemEnv: joined.readSystemEnvironment?.() ?? {},
+        });
+
         const doSpawn = (file, args) => {
-            const child = spawnImpl(file, args, { detached: true, stdio: "ignore", windowsHide: true });
+            const child = spawnImpl(file, args, {
+                detached: true,
+                stdio: "ignore",
+                windowsHide: true,
+                env: childEnv,
+            });
             // spawn 对不存在/不可执行的路径不抛同步异常，而是异步发 error 事件——
             // 必须监听，否则崩掉整个 Broker（demo 教训）
             child.on("error", (e) => {
