@@ -40,7 +40,8 @@ export function createBrowserManager({
     now = () => Date.now(),
     /** 扩展最近消息时间戳（broker-server 注入；0 = 从未连过） */
     getExtensionLastSeenAt = () => 0,
-    /** 升级放行门控（broker-server 注入：仍有停留在 launching_browser/waiting_extension 的任务） */
+    /** 升级放行门控（broker-server 注入：该任务仍停留在 launching_browser/waiting_extension）。
+     *  必须按 taskId 判定——过期升级定时器不得在另一个任务的等待期用旧 URL 拉起。 */
     shouldEscalate = () => true,
     setTimeoutImpl = setTimeout,
 } = {}) {
@@ -163,6 +164,10 @@ export function createBrowserManager({
     }
 
     let lastLaunchAt = 0;
+    /** 最后一次成功发起 spawn 的任务（与 lastLaunchAt 分离：后者在 doLaunch 入口无条件赋值，
+     *  解析失败时并无真实开窗）。preopened 必须按任务归因，不能比时间戳——同毫秒会漏判、
+     *  过期升级定时器也会把别的任务的拉起算到当前任务头上。 */
+    let lastSpawnTaskId = null;
     let launchCount = 0;
     /** taskId → 升级定时器（单任务至多一笔 pending） */
     const escalationTimers = new Map();
@@ -185,7 +190,7 @@ export function createBrowserManager({
 
     /** 实拉核心（ensureRunning 与升级 path 共用；不含防抖与前置判定）。
      *  每次实拉消费防抖窗口（lastLaunchAt），失败形状与 v2.10 保持一致。 */
-    function doLaunch({ url, reason }) {
+    function doLaunch({ url, reason, taskId = null }) {
         lastLaunchAt = now();
         const ready = ensureResolvedImpl();
         if (!ready.ok) {
@@ -230,6 +235,8 @@ export function createBrowserManager({
         try {
             doSpawn(command.command.file, command.command.args);
             launchCount += 1;
+            // spawn 调用返回只代表已发起（异步 error 仍可能失败）；preopened 让插件多等一会儿即可兜底
+            if (taskId) lastSpawnTaskId = taskId;
             audit?.append("browser_launch", {
                 family: ready.config.family,
                 profile: ready.config.profileDir,
@@ -257,7 +264,7 @@ export function createBrowserManager({
         const timer = setTimeoutImpl(() => {
             escalationTimers.delete(taskId);
             const seenNow = Number(getExtensionLastSeenAt()) || 0;
-            if (seenNow > seenAtSchedule || !shouldEscalate()) {
+            if (seenNow > seenAtSchedule || !shouldEscalate(taskId)) {
                 // 留痕：否则 M12 取证看不到「升级被抑制」，只能靠推测
                 audit?.append("browser_launch_escalation_skipped", {
                     taskId,
@@ -268,7 +275,7 @@ export function createBrowserManager({
             }
             escalatedTaskIds.add(taskId);
             if (escalatedTaskIds.size > ESCALATED_TASK_CAP) escalatedTaskIds.clear();
-            const launched = doLaunch({ url, reason: "skip-escalation" });
+            const launched = doLaunch({ url, reason: "skip-escalation", taskId });
             audit?.append("browser_launch_escalated", { taskId, ok: launched?.ok !== false });
         }, ESCALATION_DELAY_MS);
         escalationTimers.set(taskId, timer);
@@ -309,11 +316,11 @@ export function createBrowserManager({
                 scheduleEscalation({ url, reason, taskId });
                 return { ok: true, skipped: true, skipReason };
             }
-            return doLaunch({ url, reason });
+            return doLaunch({ url, reason, taskId });
         },
 
         getStatus() {
-            return { launchCount, lastLaunchAt, pendingEscalations: escalationTimers.size, config: readConfig() };
+            return { launchCount, lastLaunchAt, lastSpawnTaskId, pendingEscalations: escalationTimers.size, config: readConfig() };
         },
     };
 }

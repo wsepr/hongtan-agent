@@ -116,8 +116,9 @@ export function createBroker({
         // P2 前置判定（《常驻工作区设计方案》§5.2）：吻痕新鲜 / 进程探测命中 → skip spawn。
         // 两处均为延迟执行闭包（变量声明见下方/上方，调用时才求值）
         getExtensionLastSeenAt: () => extensionLastSeenAt,
-        shouldEscalate: () => {
-            const t = taskStore.activeTask();
+        // 按任务判定：过期升级定时器不得因“另有任务在等”就用旧 URL 拉起
+        shouldEscalate: (taskId) => {
+            const t = taskStore.get(taskId);
             return !!t && ["launching_browser", "waiting_extension"].includes(t.state);
         },
     });
@@ -188,7 +189,7 @@ export function createBroker({
                       onboarding: buildOnboardingHint(),
                   }
                 : { connected: false, onboarding: buildOnboardingHint() },
-        sendTaskStart: (task, { resume = false } = {}) =>
+        sendTaskStart: (task, { resume = false, preopened = false } = {}) =>
             sendToExtension({
                 type: "task.start",
                 taskId: task.id,
@@ -196,6 +197,9 @@ export function createBroker({
                 params: task.params,
                 // 显式续接（§8.3）：带 resumeOf 的 task.start 让插件把暂停中的任务推回 running
                 ...(resume ? { resumeOf: task.id } : {}),
+                // 预开窗标志（v2.12）：最后一次成功发起的 spawn 属于本任务——深链窗口可能仍在
+                // 创建中（移交/冷启动开窗是异步的），插件收到后应先短暂等待预开窗再兜底自建
+                ...(preopened ? { preopened: true } : {}),
             }),
         sendTaskCancel: (taskId) => sendToExtension({ type: "task.cancel", taskId }),
         syncRequest: (action, params, timeoutMs) =>
@@ -382,9 +386,12 @@ export function createBroker({
             const task = taskStore.get(id);
             if (!task || !["launching_browser", "waiting_extension"].includes(task.state)) continue;
             tools.clearExtensionDeadline(task.id);
-            if (sessionFacade.sendTaskStart(task)) {
+            // 预开窗判定：最后一次成功发起的 spawn 属于本任务——spawn 后深链窗口可能仍在创建中，
+            // 插件收到后应先短暂等待预开窗再兜底自建。按任务归因，避免同毫秒时间戳漏判与跨任务误判
+            const preopened = browserManager.getStatus().lastSpawnTaskId === task.id;
+            if (sessionFacade.sendTaskStart(task, { preopened })) {
                 taskStore.setState(task, "running");
-                audit.append("task_dispatched", { taskId: task.id, via: "hello-redelivery" });
+                audit.append("task_dispatched", { taskId: task.id, via: "hello-redelivery", preopened });
             }
         }
     }
