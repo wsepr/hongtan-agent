@@ -99,6 +99,9 @@ export function createToolExecutor({
     const contractsHash = contractsFingerprint(contracts ?? null);
     const options = {
         syncTimeoutMs: 10_000,
+        // 查询前拉取会员态是可失败的增强（失败即回退 Broker 缓存），不沿用 syncTimeoutMs——
+        // 否则设备未批准 / 插件未应答时会白等 10s，把只读查询拖慢
+        vipSyncTimeoutMs: 2_000,
         waitPollIntervalMs: 500,
         cancelTimeoutMs: 30_000,
         extensionDeadlineMs: 90_000,
@@ -165,11 +168,32 @@ export function createToolExecutor({
         return session.syncRequest(action, params, options.syncTimeoutMs);
     }
 
+    /**
+     * 查询前拉取最新会员态。
+     *
+     * Broker 只在握手（hello）时缓存 vip——用户在握手之后登录 / 登出 / 刷新信封时，
+     * 扩展侧缓存已更新而 Broker 内存仍是旧值（曾导致「插件已显示 VIP，AI 查仍为 null」）。
+     * 此处经既有 sync.request 通道实时拉一次，覆盖由 broker-server 的 syncRequest 写穿完成。
+     * 拉取失败一律静默沿用缓存（与快照刷新失败同口径），不阻塞只读查询。
+     */
+    async function refreshVipState() {
+        const info = session.extensionInfo();
+        // 设备未批准时插件会丢弃 sync.request（agentBridge 的 deviceApproved 门禁），
+        // 拉取只会白等到超时——直接跳过
+        if (!info?.connected || info.deviceApproved === false) return;
+        try {
+            await session.syncRequest("get_vip_state", {}, options.vipSyncTimeoutMs);
+        } catch {
+            /* 静默：沿用 Broker 缓存 */
+        }
+    }
+
     // ------------------------------------------------------------------
     // 工具实现
     // ------------------------------------------------------------------
 
-    function toolConnectionStatus(ctx = {}) {
+    async function toolConnectionStatus(ctx = {}) {
+        await refreshVipState();
         const info = session.extensionInfo();
         const active = taskStore.activeTask();
         const limit = info?.vip?.isVip ? limits.articleLimitMax ?? 500 : limits.nonVipArticleLimit ?? 20;
@@ -268,11 +292,11 @@ export function createToolExecutor({
      * 首次引导（家族/extId 未记录）→ needs_manual_open。不返回数据集。
      */
     async function toolPrepareEnv(args, ctx = {}) {
-        const connection = () => toolConnectionStatus(ctx).data;
+        const connection = async () => (await toolConnectionStatus(ctx)).data;
         if (session.isConnected()) {
             return ok({
                 ensure: { state: "connected", launched: false, skippedReason: "already-connected", deadlineAt: null },
-                connection: connection(),
+                connection: await connection(),
             });
         }
         const waitKey = `env:${uuid()}`;
@@ -301,7 +325,7 @@ export function createToolExecutor({
                     message: launched.message ?? null,
                     deadlineAt: null,
                 },
-                connection: connection(),
+                connection: await connection(),
             });
         }
         // waitSec 短等待（连上即早退）；不传则立即返回 connecting，由 AI 按 ≥10s 复查
@@ -321,7 +345,7 @@ export function createToolExecutor({
                 skippedReason: launched?.skipReason ?? null,
                 deadlineAt: now() + options.extensionDeadlineMs,
             },
-            connection: connection(),
+            connection: await connection(),
         });
     }
 
@@ -666,7 +690,7 @@ export function createToolExecutor({
         audit?.append("tool_call", { tool });
         switch (tool) {
             case "xhs_connection_status":
-                return toolConnectionStatus(ctx);
+                return await toolConnectionStatus(ctx);
             case "xhs_prepare_env":
                 return toolPrepareEnv(args, ctx);
             case "xhs_list_datasets":

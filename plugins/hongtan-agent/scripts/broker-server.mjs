@@ -222,8 +222,8 @@ export function createBroker({
                 ...(preopened ? { preopened: true } : {}),
             }),
         sendTaskCancel: (taskId) => sendToExtension({ type: "task.cancel", taskId }),
-        // 数据集的 sync 写穿（详细设计 §2.5/§5.2）：成功后覆盖快照 datasets 段；
-        // create/rename 成功后 fire-and-forget 再拉一次 list，保证快照与插件权威一致
+        // sync 写穿（详细设计 §2.5/§5.2）：数据集成功后覆盖快照 datasets 段（create/rename 再 fire-and-forget
+        // 拉一次 list，保证快照与插件权威一致）；会员态（get_vip_state）成功后覆盖内存会话与快照 session 段
         syncRequest: async (action, params, timeoutMs) => {
             const result = await rawSyncRequest(action, params, timeoutMs);
             if (result?.ok) {
@@ -232,6 +232,20 @@ export function createBroker({
                     audit.append("snapshot_datasets_refreshed", { count: (result.data?.datasets ?? []).length });
                 } else if (action === "create_dataset" || action === "rename_dataset") {
                     refreshDatasets();
+                } else if (action === "get_vip_state") {
+                    // 会员态实时拉取（工具查询前触发）：Broker 只在 hello 时缓存一次 vip，
+                    // 登录/登出/信封刷新后必须由此覆盖，否则 connection_status 一直报握手时的旧值
+                    if (extensionSession) {
+                        extensionSession.vip = result.data?.vip ?? null;
+                        // 与 handleHello 同口径写 session 段：lastKnown 与在线会话保持一致
+                        snapshotStore.writeSession({
+                            extId: extensionSession.extId,
+                            browserFamily: extensionSession.browserFamily,
+                            vip: extensionSession.vip,
+                            quota: extensionSession.quota,
+                            lastSeenAt: now(),
+                        });
+                    }
                 }
             }
             return result;
