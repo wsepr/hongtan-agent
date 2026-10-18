@@ -203,13 +203,15 @@ export function createTaskStore({
     }
 
     return {
-        createTask({ kind, params }) {
+        createTask({ kind, params, source = "agent" }) {
             seqCounter += 1;
             const id = `t${now().toString(36)}${seqCounter.toString(36).padStart(3, "0")}`;
             const task = {
                 id,
                 kind,
                 params,
+                // 任务来源（详细设计 §2.3）：manual = 用户在插件里手动发起的抓取（不可由 AI 取消/续跑）
+                source,
                 state: "queued",
                 seq: 0,
                 processed: { articles: 0, comments: 0, images: 0, skippedByBlacklist: 0, skippedExisting: 0 },
@@ -242,6 +244,11 @@ export function createTaskStore({
                 if (BROKER_ACTIVE_STATES.has(task.state)) return task;
             }
             return null;
+        },
+
+        /** 可续跑判定（详细设计 §2.3）：仅中间态的 Agent 任务可续；手工任务不支持续跑 */
+        isResumable(task) {
+            return !!task && BROKER_INTERMEDIATE_STATES.has(task.state) && (task.source ?? "agent") === "agent";
         },
 
         list({ limit = 20, datasetId } = {}) {
@@ -357,6 +364,8 @@ export function createTaskStore({
                 taskId: task.id,
                 state: task.state,
                 kind: task.kind,
+                /** 任务来源（详细设计 §2.3）：旧落盘记录缺字段时按 agent 兜底 */
+                source: task.source ?? "agent",
                 params: task.params,
                 /** 插件解析后的真实数据集 id（AI 给的只是名字；早期失败/未解析时为 null） */
                 datasetId: Number.isFinite(task.datasetId) ? task.datasetId : null,
@@ -369,12 +378,14 @@ export function createTaskStore({
                 resumeCount: task.resumeCount,
                 extensionTabId: task.extensionTabId,
                 /**
-                 * 孤儿信号（§8.1 / §6.3）：在跑任务超过 60s 没有新消息 ⇒ 视为已失联，
+                 * 孤儿信号（§8.1 / §6.3 / 详细设计 §2.2）：**全部活跃态**超过 60s 没有新消息 ⇒ 视为已失联，
                  * 插件稍后会自行恢复或转终态。只读回给 AI，便于其如实转述「任务似乎失联、
-                 * 正在自愈」而不是把长时间静默当成正常推进。
+                 * 正在自愈」而不是把长时间静默当成正常推进。原先只判 running，会让冻结在
+                 * 暂停态的旧记录静默失真。
                  */
                 orphaned:
-                    task.state === "running" && now() - (task.updatedAt ?? task.createdAt ?? now()) > ORPHAN_TIMEOUT_MS,
+                    BROKER_ACTIVE_STATES.has(task.state) &&
+                    now() - (task.updatedAt ?? task.createdAt ?? now()) > ORPHAN_TIMEOUT_MS,
                 error: task.error,
                 summary: task.summary,
                 createdAt: task.createdAt,

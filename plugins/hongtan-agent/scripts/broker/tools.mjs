@@ -1,14 +1,19 @@
 /**
- * MCP 工具执行器（设计文档 §6.3 / 执行计划 S1）——9 工具。
+ * MCP 工具执行器（设计文档 §6.3 / 详细设计 §2.2）——11 工具。
  *
- * - 数据集类（list/create/rename）经 WS sync.request 透传到插件，离线返回 EXTENSION_OFFLINE；
+ * - 数据集类（list/create/rename）经 WS sync.request 透传到插件；list_datasets 离线可降级读快照
+ *   （source:"cache"），其余离线返回 EXTENSION_OFFLINE；
+ * - connection_status 离线补 lastKnown（取自会话快照）/canWake/alerts；
+ * - prepare_env 纯唤醒（幂等、不占单飞、不耗配额），不返回数据集；
  * - start_crawl 立即返回 task handle（慢路径在状态机里，M2 实证模式）；
  * - wait_for_task 短挂起（按 limits.waitHangSecMax 自钳，当前 30s + sinceSeq 增量）；
- * - cancel_task 走取消确认协议（30s 超时 → CANCEL_TIMEOUT，任务保持可恢复）。
+ * - task_status/task_list 附 freshness（新鲜度自述）+ 修复式拉起；
+ * - cancel_task 走取消确认协议（30s 超时 → CANCEL_TIMEOUT，任务保持可恢复），手工任务直接拒绝。
  *
- * 全部依赖注入（session/taskStore/audit/browserManager/now/sleep），可单测。
+ * 全部依赖注入（session/taskStore/audit/browserManager/snapshotStore/alerts/now/sleep），可单测。
  */
 
+import crypto from "node:crypto";
 import { validateAgainstSchema } from "./schema.mjs";
 import { BROKER_TERMINAL_STATES, BROKER_INTERMEDIATE_STATES, WAIT_EARLY_RETURN_STATES } from "./task-store.mjs";
 import { BROWSER_UNRESOLVABLE } from "./browser/resolve-exe.mjs";
@@ -58,6 +63,22 @@ export function formatQuotaMessage(quotaInfo) {
     return `配额冷却中：${reason}，建议 ${hhmm} 后再开始`;
 }
 
+/**
+ * 账本新鲜度自述（详细设计 §2.2 / §7.1）——纯函数，只保留不可派生字段：
+ * activeTaskFrozen 由「activeTask != null && !extensionConnected」派生，不单设。
+ */
+export function buildFreshness({ info, task, now: _now } = {}) {
+    return {
+        extensionConnected: !!info?.connected,
+        lastExtensionMessageAt: info?.lastSeenAt ?? null,
+        staleReason: !info?.connected
+            ? "extension-offline"
+            : task?.error?.code === "BROKER_RESTARTED"
+              ? "broker-restarted"
+              : null,
+    };
+}
+
 export function createToolExecutor({
     contracts,
     taskStore,
@@ -65,6 +86,9 @@ export function createToolExecutor({
     session,
     browserManager,
     rateLimiter = null,
+    snapshotStore = null,
+    alerts = null,
+    uuid = () => crypto.randomUUID(),
     now = () => Date.now(),
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     config = {},
@@ -215,8 +239,124 @@ export function createToolExecutor({
             // AI 可先查「何时可启动」，避免调了 start_crawl 才知道要等
             quota: info?.quota ?? null,
             activeTask: active ? taskStore.snapshot(active) : null,
+            // 离线只读（详细设计 §2.2）：lastKnown 取自会话快照的 session 段（同一文件同一 TTL）——
+            // **仅离线时返回**；在线恒为 null，缓存永不参与在线回答
+            lastKnown: !info?.connected ? buildLastKnown(info) : null,
+            // 可唤醒（布尔；不设 hints[]，下一步建议复用既有 onboarding）
+            canWake: true,
+            // 最近告警摘要（白名单字段 kind/at/taskId；仅覆盖当前 Broker 进程存活期）
+            alerts: alerts?.digest?.() ?? [],
             onboarding: info?.onboarding ?? null,
         });
+    }
+
+    /** 离线会话摘要：命中快照 session 段 → {...session, extId, browserFamily, cachedAt}，否则 null */
+    function buildLastKnown(info) {
+        const cached = snapshotStore?.readSession?.({ extId: info?.extId ?? null }) ?? null;
+        if (!cached) return null;
+        return {
+            ...(cached.session ?? {}),
+            extId: cached.extId,
+            browserFamily: cached.browserFamily,
+            cachedAt: cached.cachedAt,
+        };
+    }
+
+    /**
+     * xhs_prepare_env（详细设计 §2.2 / §6）：纯唤醒——拉起浏览器并等连接。
+     * 幂等（已连上不拉）、不占任务单飞、不耗配额；空 URL（不预开抓取深链，避免劫持用户当前搜索页）；
+     * 首次引导（家族/extId 未记录）→ needs_manual_open。不返回数据集。
+     */
+    async function toolPrepareEnv(args, ctx = {}) {
+        const connection = () => toolConnectionStatus(ctx).data;
+        if (session.isConnected()) {
+            return ok({
+                ensure: { state: "connected", launched: false, skippedReason: "already-connected", deadlineAt: null },
+                connection: connection(),
+            });
+        }
+        const waitKey = `env:${uuid()}`;
+        let launched = null;
+        try {
+            launched = browserManager?.ensureRunning({ url: null, reason: "prepare", waitKey }) ?? null;
+        } catch (e) {
+            logger.warn?.("[broker] 准备环境拉起失败:", e?.message ?? e);
+        }
+        // 任何拉起失败都归入「需人工打开」：环境等待**没有**任务补投递路径（不像 waiting_extension
+        // 还有 hello 重投 + watchdog 重拉），继续等下去没有出路。首次引导（browser.json 无 family/extId）
+        // 的失败形状**不带 code**，旧实现只认 BROWSER_UNRESOLVABLE 会把它误报成 connecting。
+        if (launched?.ok === false) {
+            const skippedReason = launched.code === BROWSER_UNRESOLVABLE ? "browser-unresolvable" : "browser-config-missing";
+            audit?.append("env_prepare", {
+                reason: args?.reason ?? null,
+                state: "needs_manual_open",
+                code: launched.code ?? null,
+                message: launched.message ?? null,
+            });
+            return ok({
+                ensure: {
+                    state: "needs_manual_open",
+                    launched: false,
+                    skippedReason,
+                    message: launched.message ?? null,
+                    deadlineAt: null,
+                },
+                connection: connection(),
+            });
+        }
+        // waitSec 短等待（连上即早退）；不传则立即返回 connecting，由 AI 按 ≥10s 复查
+        const waitSec = Number.isFinite(args?.waitSec) ? args.waitSec : 0;
+        if (waitSec > 0) {
+            const deadline = now() + waitSec * 1000;
+            while (now() < deadline && !session.isConnected()) {
+                await sleep(Math.min(options.waitPollIntervalMs, Math.max(1, deadline - now())));
+            }
+        }
+        const state = session.isConnected() ? "connected" : "connecting";
+        audit?.append("env_prepare", { reason: args?.reason ?? null, state, launched: launched?.ok !== false });
+        return ok({
+            ensure: {
+                state,
+                launched: launched?.ok !== false,
+                skippedReason: launched?.skipReason ?? null,
+                deadlineAt: now() + options.extensionDeadlineMs,
+            },
+            connection: connection(),
+        });
+    }
+
+    /**
+     * 数据集列表（详细设计 §2.2 / §5.4）：在线恒取活体（source:"live"）；离线降级读快照
+     * （source:"cache" + stale + cachedAt）；未命中（无快照/超 TTL/extId 不匹配）→ EXTENSION_OFFLINE。
+     */
+    async function toolListDatasets() {
+        if (session.isConnected()) {
+            const r = await session.syncRequest("list_datasets", {}, options.syncTimeoutMs);
+            if (!r?.ok) return r ?? err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
+            return ok({ datasets: r.data?.datasets ?? [], source: "live" });
+        }
+        const cached = snapshotStore?.readDatasets?.({ extId: session.extensionInfo()?.extId ?? null }) ?? null;
+        if (cached) return ok({ datasets: cached.datasets, source: "cache", stale: true, cachedAt: cached.cachedAt });
+        return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
+    }
+
+    /** 修复式拉起（R2，详细设计 §7.2）：仅「账本有活跃任务 + 扩展离线（矛盾信号）」时触发一次 */
+    function maybeRepairTaskQuery() {
+        if (session.isConnected()) return null;
+        const active = taskStore.activeTask();
+        if (!active) return null;
+        let launched = null;
+        try {
+            launched = browserManager?.ensureRunning({ url: null, reason: "task-query", waitKey: `task-query:${active.id}` }) ?? null;
+        } catch (e) {
+            logger.warn?.("[broker] 任务查询修复式拉起失败:", e?.message ?? e);
+        }
+        const skippedReason = launched?.skipReason ?? null;
+        // 真的发起过拉起才算「拉起」：防抖命中 / 进程探测命中（skipped）时只是「尝试」，
+        // 审计与响应都如实标注，避免事后把"没拉也记成拉了"当证据。
+        const attempted = launched?.ok !== false && launched?.skipped !== true;
+        audit?.append("task_query_launch", { taskId: active.id, launched: attempted, skippedReason });
+        return { triggered: true, taskId: active.id, launched: attempted, skippedReason };
     }
 
     async function toolStartCrawl(args) {
@@ -336,6 +476,10 @@ export function createToolExecutor({
     function toolResumeTask(taskId) {
         const task = taskStore.get(taskId);
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${taskId}`);
+        // 手工任务不进可续跑集合（详细设计 §7.4）：失败即用户重跑，AI 不得据此暗示「可接着跑」
+        if ((task.source ?? "agent") === "manual") {
+            return err("RESUME_NOT_APPLICABLE", "手工任务不支持续跑，请重新发起");
+        }
         if (!BROKER_INTERMEDIATE_STATES.has(task.state)) {
             return err(
                 "RESUME_NOT_APPLICABLE",
@@ -360,15 +504,26 @@ export function createToolExecutor({
     function toolTaskStatus(args) {
         const task = taskStore.get(args?.taskId);
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${args?.taskId}`);
-        return ok(taskStore.snapshot(task));
+        const info = session.extensionInfo();
+        const repair = maybeRepairTaskQuery();
+        return ok({
+            // 快照自带 source（task-store）；离线时不冒充实时，附 freshness 自述
+            ...taskStore.snapshot(task),
+            freshness: buildFreshness({ info, task, now: now() }),
+            ...(repair ? { repair } : {}),
+        });
     }
     function toolTaskList(args) {
         const limit = Math.min(Math.max(1, args?.limit ?? 20), 50);
         // datasetId：按插件上报的真实数据集归属过滤（重名/改名后按名字无法定位）
         const datasetId = Number.isFinite(args?.datasetId) ? args.datasetId : undefined;
         const ids = taskStore.list({ limit, datasetId });
+        const info = session.extensionInfo();
+        const repair = maybeRepairTaskQuery();
         return ok({
             tasks: ids.map((id) => taskStore.snapshot(taskStore.get(id))).filter(Boolean),
+            freshness: buildFreshness({ info, task: taskStore.activeTask(), now: now() }),
+            ...(repair ? { repair } : {}),
         });
     }
 
@@ -450,6 +605,12 @@ export function createToolExecutor({
         const task = taskStore.get(args?.taskId);
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${args?.taskId}`);
         if (BROKER_TERMINAL_STATES.has(task.state)) return ok(taskStore.snapshot(task));
+        // 手工任务直接拒绝（详细设计 §7.4）：插件侧 handleTaskCancel 只认 Agent 态，会对 adopted 的
+        // 手工任务回 NO_ACTIVE_TASK，而 Broker 把这种拒绝强制收敛为 canceled → 会谎报「已取消」，
+        // 实际手工抓取仍在跑。位置在终态检查之后、置 canceling 之前。
+        if ((task.source ?? "agent") === "manual") {
+            return err("CANCEL_REJECTED", "手工任务请在插件中取消（AI 侧不支持取消手工任务）");
+        }
 
         // 取消确认协议：通知插件 → 等 30s 终态；超时回退原状态并返回 CANCEL_TIMEOUT（任务保持可恢复）
         const previousState = task.state;
@@ -506,8 +667,10 @@ export function createToolExecutor({
         switch (tool) {
             case "xhs_connection_status":
                 return toolConnectionStatus(ctx);
+            case "xhs_prepare_env":
+                return toolPrepareEnv(args, ctx);
             case "xhs_list_datasets":
-                return syncRequest("list_datasets", {});
+                return toolListDatasets();
             case "xhs_create_dataset":
                 return syncRequest("create_dataset", { name: args?.name, ...(args?.description ? { description: args.description } : {}) });
             case "xhs_rename_dataset":

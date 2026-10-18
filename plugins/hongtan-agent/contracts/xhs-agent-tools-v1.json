@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 1,
-    "toolsVersion": 8,
+    "toolsVersion": 9,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -86,7 +86,7 @@
         },
         "CANCEL_REJECTED": {
             "message": "取消请求被插件拒绝",
-            "aiGuidance": "说明抓取可能仍在进行，稍后用 xhs_task_status 复查。立即重复取消结果相同，先查状态再决定。",
+            "aiGuidance": "若任务 source=\"manual\"（用户在插件里手动发起）：AI 侧一律拒绝取消，如实告知「手工任务请在插件中取消」，不得声称已取消（手工抓取仍在跑）；否则说明抓取可能仍在进行，稍后用 xhs_task_status 复查。立即重复取消结果相同，先查状态再决定。",
             "retryable": true
         },
         "BLOCKED_BY_RISK": {
@@ -116,7 +116,7 @@
         },
         "RESUME_NOT_APPLICABLE": {
             "message": "该任务当前状态不支持续接",
-            "aiGuidance": "先用 xhs_task_status 确认状态：只有 blocked_by_risk / stalled_by_background / interrupted 才可续接；其余情况按该状态的指引处理。不改状态的重复续跑结果相同。",
+            "aiGuidance": "先用 xhs_task_status 确认 source 与状态：若 source=\"manual\"（用户在插件里手动发起），如实告知「手工任务不支持续跑，请重新发起」——手工任务不进可续跑集合，不得暗示可接着跑；否则只有 blocked_by_risk / stalled_by_background / interrupted 的 Agent 任务才可续接，其余情况按该状态的指引处理。不改状态的重复续跑结果相同。",
             "retryable": false
         },
         "RATE_LIMITED": {
@@ -164,7 +164,7 @@
         {
             "name": "xhs_connection_status",
             "kind": "control",
-            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
+            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。离线（extension.connected=false）时另回 lastKnown（上次在线时的会话摘要：lastSeenAt/vip/quota/extId/browserFamily/cachedAt；超 24 小时或换浏览器/extId 不匹配时为 null——不得拿不确定的旧数据当决策依据）、canWake（是否可唤醒，true 表示可调 xhs_prepare_env 拉起浏览器）与 alerts（最近告警摘要，白名单字段只有 kind/at/taskId，仅覆盖当前 Broker 进程存活期；跨重启历史只能查 stateDir/audit.jsonl）。在线时 lastKnown 恒为 null——在线回答只来自活体查询。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -172,9 +172,31 @@
             }
         },
         {
+            "name": "xhs_prepare_env",
+            "kind": "control",
+            "description": "纯唤醒：把装有红探扩展的浏览器拉起并等待扩展连接（约 10-60 秒，会打开空白页并把窗口切到前台）——用于「先只读定位、再决定是否抓取」或抓取前的环境就绪。不返回数据集（数据集请用 xhs_list_datasets）。幂等：已连上时立即返回、不拉起、不弹窗；浏览器在跑仅扩展休眠时只等回连。不占任务单飞、不消耗任务节奏配额（它不是抓取任务），也不代表用户已同意抓取。返回 ensure{state, launched, skippedReason, deadlineAt} 与 connection（与 xhs_connection_status 同构）：state=connected（已就绪）｜connecting（拉起/回连中，按 ≥10 秒间隔复查 xhs_connection_status，deadlineAt 为本次唤醒的放弃时刻）｜needs_manual_open（首次引导：扩展从未连接过、本机无从解析浏览器配置，需按 onboarding 引导用户手动打开）。因涉及拉起浏览器并抢焦点，调用前需向用户做轻量确认（「需要打开浏览器，约 10-60 秒，会把窗口切到前台」）；用户已在推进抓取工作流（明确要抓/要选集）时可直接调用。prepare 之后紧接着 xhs_start_crawl 没有额外成本（已连上即直发派发、不再拉起）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "本次唤醒的用途说明（可选；仅用于审计与向用户复述，最长 200 字符）"
+                    },
+                    "waitSec": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "description": "本调用内短等待秒数（可选，默认 0=立即返回 connecting）。>0 时最多等待该秒数，连上即提前返回 connected"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
             "name": "xhs_list_datasets",
             "kind": "sync",
-            "description": "列出红探插件中的数据集（名称、现有笔记数、已抓评论数），用于选择或确认抓取目标数据集。无参数。扩展离线时返回 EXTENSION_OFFLINE，稍后重查。",
+            "description": "列出红探插件中的数据集（名称、现有笔记数、已抓评论数），用于选择或确认抓取目标数据集。无参数。响应含 source 字段标明数据来源：在线恒为 \"live\"（必发活体查询，缓存永不参与在线回答）；扩展离线但命中上次在线快照时为 \"cache\"，并附 stale:true 与 cachedAt（= 上次刷新时刻）——此时必须如实复述「这是上次浏览器在线时（cachedAt）看到的列表，可能已过期」，且不得把快照当作数据集存在性/容量的判据；离线且无快照、快照超 24 小时或 extId 不匹配时返回 EXTENSION_OFFLINE（宁可不答，不给旧数据），稍后重查或先用 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -238,7 +260,7 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时把该窗口带到前台；采集期间若该窗口被遮挡或最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡/最小化（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时把该窗口带到前台；采集期间若该窗口被遮挡或最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡/最小化（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持续跑**：resumeTaskId 指向手工任务会返回 RESUME_NOT_APPLICABLE（文案「手工任务不支持续跑，请重新发起」），失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -316,7 +338,7 @@
         {
             "name": "xhs_task_status",
             "kind": "sync",
-            "description": "查询任务快照（状态、进度、当前篇目、错误码、resumeCount、orphaned、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。orphaned=true 表示在跑任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行恢复或转终态）：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务。",
+            "description": "查询任务快照（状态、进度、当前篇目、错误码、resumeCount、orphaned、source 来源、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。orphaned=true 表示任意活跃态任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行恢复或转终态）：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason} 自述账本新鲜度：staleReason=\"extension-offline\" 表示扩展当前离线（账本里的活跃任务可能已冻结，不要冒充实时——activeTaskFrozen 由 activeTask 非空 && extensionConnected=false 派生）；staleReason=\"broker-restarted\" 表示该任务曾被 Broker 重启占位为失败、正等插件重播核对。源为 manual 的任务（source=\"manual\"）不可由 AI 取消、不可续跑。若「账本有活跃任务但扩展离线」（矛盾信号、幽灵任务嫌疑），响应会带 repair{triggered:true, taskId, skippedReason} 表示已尝试修复式拉起浏览器——如实说明「账本里有一条在跑的任务、但扩展当前离线，属异常，正在重新连接并核对」，不要谎报仍在 running。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -334,7 +356,7 @@
         {
             "name": "xhs_task_list",
             "kind": "sync",
-            "description": "查询最近任务列表（供用户回来后排障与复盘「我不在的时候发生了什么」）。可按 limit 截取条数，也可按 datasetId 只看某个数据集的任务（datasetId 是插件解析后的真实数据集 id，可从 xhs_list_datasets 或任务快照的 datasetId 字段获得；注意它不是 AI 传入 datasetName 的替代——重名/改名后按名字无法定位）。每条任务快照含 datasetId（未解析数据集的早期失败为 null）。",
+            "description": "查询最近任务列表（供用户回来后排障与复盘「我不在的时候发生了什么」）。可按 limit 截取条数，也可按 datasetId 只看某个数据集的任务（datasetId 是插件解析后的真实数据集 id，可从 xhs_list_datasets 或任务快照的 datasetId 字段获得；注意它不是 AI 传入 datasetName 的替代——重名/改名后按名字无法定位）。每条任务快照含 datasetId（未解析数据集的早期失败为 null）与 source（\"agent\"=AI 发起，\"manual\"=用户在插件里手动发起；manual 任务只覆盖本次能力实施之后的手工任务，**不得声称这就是全部历史手工任务**）。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason}（账本新鲜度自述；staleReason=\"extension-offline\" 时活跃任务可能已冻结）与（仅在「有活跃任务且扩展离线」时出现的）repair{triggered:true, taskId, skippedReason}（已尝试修复式拉起浏览器；如实说明异常，不要谎报 running）。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -385,7 +407,7 @@
         {
             "name": "xhs_cancel_task",
             "kind": "sync",
-            "description": "取消进行中的抓取任务（走取消确认协议，30 秒超时兜底）。取消后如实向用户汇报已入库数量，不要谎报完成。",
+            "description": "取消进行中的抓取任务（走取消确认协议，30 秒超时兜底）。仅适用于 AI 发起的任务（source=\"agent\"）：源为 manual（用户在插件里手动发起）的任务**直接拒绝**并返回 CANCEL_REJECTED（文案「手工任务请在插件中取消」）——AI 不得取消手工任务，也不得声称已取消（此时手工抓取仍在跑）。取消后如实向用户汇报已入库数量，不要谎报完成。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

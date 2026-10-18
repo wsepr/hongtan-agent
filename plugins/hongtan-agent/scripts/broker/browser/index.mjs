@@ -25,8 +25,8 @@ import { mergeChildEnvironment } from "./child-env.mjs";
 const RECENT_CONTACT_MS = 60_000;
 /** skip 后的升级等待：到期仍无回连才强制拉起（保证 90s 截止前仍有 ≥60s 冷启动预算） */
 const ESCALATION_DELAY_MS = 30_000;
-/** 已完成升级的任务 id 集合上限（防泄漏；任务 id 全局唯一，超限整表清理即可） */
-const ESCALATED_TASK_CAP = 500;
+/** 已完成升级的门控键集合上限（防泄漏；门控键全局唯一，超限整表清理即可） */
+const ESCALATED_KEY_CAP = 500;
 
 export function createBrowserManager({
     configPath,
@@ -40,8 +40,10 @@ export function createBrowserManager({
     now = () => Date.now(),
     /** 扩展最近消息时间戳（broker-server 注入；0 = 从未连过） */
     getExtensionLastSeenAt = () => 0,
-    /** 升级放行门控（broker-server 注入：该任务仍停留在 launching_browser/waiting_extension）。
-     *  必须按 taskId 判定——过期升级定时器不得在另一个任务的等待期用旧 URL 拉起。 */
+    /** 升级放行门控（broker-server 注入）。收 `{taskId, waitKey}`：
+     *  有 taskId ⇒ 该任务仍停留在 launching_browser/waiting_extension 才放行；
+     *  无 taskId（环境等待）⇒ 只要带 waitKey 就允许升级一次（每 key 由本模块封顶）。
+     *  按 taskId/门控键判定——过期升级定时器不得在另一个任务的等待期用旧 URL 拉起。 */
     shouldEscalate = () => true,
     setTimeoutImpl = setTimeout,
 } = {}) {
@@ -169,10 +171,10 @@ export function createBrowserManager({
      *  过期升级定时器也会把别的任务的拉起算到当前任务头上。 */
     let lastSpawnTaskId = null;
     let launchCount = 0;
-    /** taskId → 升级定时器（单任务至多一笔 pending） */
+    /** 门控键 → 升级定时器（同一门控键至多一笔 pending） */
     const escalationTimers = new Map();
-    /** 已完成升级的任务 id（每任务封顶一次） */
-    const escalatedTaskIds = new Set();
+    /** 已完成升级的门控键（每 key 封顶一次） */
+    const escalatedKeys = new Set();
 
     /** 扩展最近吻痕：≤60s 视为「浏览器必然在运行」（WS 刚断，等待 alarms 自愈重连即可） */
     function recentContact() {
@@ -254,31 +256,37 @@ export function createBrowserManager({
      *  强制拉起绕过防抖（升级本身已是深思熟虑的兜底决策），由 doLaunch 消费新的防抖窗口。
      *  回连判据：排程时记下吻痕，到期仍无**新的**吻痕才算未回连——不能用「最近吻痕 ≤60s」绝对窗口，
      *  否则 skip 前 0~30s 内有接触时升级会被吞掉且不重排，实际升级点滑到 60s watchdog 之后，
-     *  把 90s 截止前的冷启动预算削到 30s（正是设计 §5.2 禁止的时点）。 */
-    function scheduleEscalation({ url, reason, taskId }) {
-        if (!taskId || escalationTimers.has(taskId) || escalatedTaskIds.has(taskId)) return;
+     *  把 90s 截止前的冷启动预算削到 30s（正是设计 §5.2 禁止的时点）。
+     *
+     *  门控键（详细设计 §2.4）：`waitKey ?? taskId`——任务等待与环境等待（xhs_prepare_env 无任务）
+     *  同构，否则「无任务的唤醒」会因 skip 永久吞掉拉起。 */
+    function scheduleEscalation({ url, reason, taskId, waitKey = null }) {
+        const gateKey = waitKey ?? taskId;
+        if (!gateKey || escalationTimers.has(gateKey) || escalatedKeys.has(gateKey)) return;
         const seenAtSchedule = Number(getExtensionLastSeenAt()) || 0;
         logger.info?.(
-            `[browser] 拉起已暂缓（taskId=${taskId}，触发 ${reason}），${ESCALATION_DELAY_MS / 1000}s 后若扩展仍未回连将强制拉起一次`
+            `[browser] 拉起已暂缓（gateKey=${gateKey}，触发 ${reason}），${ESCALATION_DELAY_MS / 1000}s 后若扩展仍未回连将强制拉起一次`
         );
         const timer = setTimeoutImpl(() => {
-            escalationTimers.delete(taskId);
+            escalationTimers.delete(gateKey);
             const seenNow = Number(getExtensionLastSeenAt()) || 0;
-            if (seenNow > seenAtSchedule || !shouldEscalate(taskId)) {
+            if (seenNow > seenAtSchedule || !shouldEscalate({ taskId, waitKey })) {
                 // 留痕：否则 M12 取证看不到「升级被抑制」，只能靠推测
                 audit?.append("browser_launch_escalation_skipped", {
                     taskId,
+                    waitKey,
                     trigger: reason,
                     reason: seenNow > seenAtSchedule ? "contact-refreshed" : "no-pending-task",
                 });
                 return;
             }
-            escalatedTaskIds.add(taskId);
-            if (escalatedTaskIds.size > ESCALATED_TASK_CAP) escalatedTaskIds.clear();
+            escalatedKeys.add(gateKey);
+            if (escalatedKeys.size > ESCALATED_KEY_CAP) escalatedKeys.clear();
+            // lastSpawnTaskId 仍只按 taskId 归因（环境拉起没有任务 → 不置位，避免误判 preopened）
             const launched = doLaunch({ url, reason: "skip-escalation", taskId });
-            audit?.append("browser_launch_escalated", { taskId, ok: launched?.ok !== false });
+            audit?.append("browser_launch_escalated", { taskId, waitKey, ok: launched?.ok !== false });
         }, ESCALATION_DELAY_MS);
-        escalationTimers.set(taskId, timer);
+        escalationTimers.set(gateKey, timer);
     }
 
     return {
@@ -300,9 +308,9 @@ export function createBrowserManager({
         /**
          * 幂等拉起（运行期）。已运行时等效开窗；30s 防抖；P2 前置判定：
          * 扩展最近吻痕 / OS 进程探测命中 → 跳过 spawn（browser_launch_skipped）并为该任务调度升级。
-         * @param {{url?: string|null, reason?: string, taskId?: string|null}} options
+         * @param {{url?: string|null, reason?: string, taskId?: string|null, waitKey?: string|null}} options
          */
-        ensureRunning({ url = null, reason = "extension-offline", taskId = null } = {}) {
+        ensureRunning({ url = null, reason = "extension-offline", taskId = null, waitKey = null } = {}) {
             const t = now();
             if (t - lastLaunchAt < LAUNCH_DEBOUNCE_MS) {
                 logger.info?.("[browser] 防抖期内，跳过重复拉起（已运行时拉起等效开窗）");
@@ -313,7 +321,7 @@ export function createBrowserManager({
                 // skip 不消费防抖窗口：若探测假阳性、随后出现真实拉起需求，不应被防抖挡住
                 logger.info?.(`[browser] 已确认浏览器在运行（${skipReason}），跳过拉起`);
                 audit?.append("browser_launch_skipped", { reason: skipReason, trigger: reason });
-                scheduleEscalation({ url, reason, taskId });
+                scheduleEscalation({ url, reason, taskId, waitKey });
                 return { ok: true, skipped: true, skipReason };
             }
             return doLaunch({ url, reason, taskId });

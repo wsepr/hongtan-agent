@@ -25,6 +25,7 @@ import { createHandshakeBackoff, extIdFromOrigin } from "./broker/handshake-back
 import { createAudit } from "./broker/audit.mjs";
 import { createPairing } from "./broker/pairing.mjs";
 import { createToolExecutor, buildTaskLaunchUrl } from "./broker/tools.mjs";
+import { createSessionSnapshotStore } from "./broker/session-snapshot.mjs";
 import { createBrowserManager } from "./broker/browser/index.mjs";
 import { createOsProbes } from "./broker/browser/os-probes.mjs";
 import { loadOrCreateDeviceIdentity, resolveStateDirectory } from "./device-identity.mjs";
@@ -54,6 +55,8 @@ export function loadConfig(env = process.env) {
         ledgerPath: path.join(stateDir, "tasks.json"),
         auditPath: path.join(stateDir, "audit.jsonl"),
         browserConfigPath: path.join(stateDir, "browser.json"),
+        // 只读会话快照（详细设计 §5.1）：与任务账本分开存（失效语义不同）
+        snapshotPath: path.join(stateDir, "session-snapshot.json"),
         extensionDeadlineMs: Number(env.HONGTAN_AGENT_EXTENSION_DEADLINE_MS ?? 90_000),
         hostKey: env.HONGTAN_AGENT_HOST ?? "workbuddy",
     };
@@ -90,7 +93,10 @@ export function createBroker({
 
     const audit = createAudit({ filePath: config.auditPath, now });
     // §11.6 告警监控：把「会静默自愈」的问题升级为可归因告警（离线超时 / 心跳停摆 / 恢复耗尽 / 连接风暴）
-    const alerts = createAlertMonitor({ now, audit, logger, thresholds: config.alertThresholds });
+    // digestSize：进 connection_status 的最近告警摘要（§9.1，仅覆盖当前进程存活期）
+    const alerts = createAlertMonitor({ now, audit, logger, thresholds: { digestSize: 10, ...(config.alertThresholds ?? {}) } });
+    // 只读会话快照（详细设计 §5）：离线时回答「上次在线看到的数据集与会话摘要」
+    const snapshotStore = createSessionSnapshotStore({ filePath: config.snapshotPath, now, logger });
     const taskStore = createTaskStore({
         ledgerPath: config.ledgerPath,
         now,
@@ -116,16 +122,24 @@ export function createBroker({
         // P2 前置判定（《常驻工作区设计方案》§5.2）：吻痕新鲜 / 进程探测命中 → skip spawn。
         // 两处均为延迟执行闭包（变量声明见下方/上方，调用时才求值）
         getExtensionLastSeenAt: () => extensionLastSeenAt,
-        // 按任务判定：过期升级定时器不得因“另有任务在等”就用旧 URL 拉起
-        shouldEscalate: (taskId) => {
-            const t = taskStore.get(taskId);
-            return !!t && ["launching_browser", "waiting_extension"].includes(t.state);
+        // 门控（详细设计 §2.4/§2.5）：有 taskId 时该任务仍停在 launching_browser/waiting_extension 才放行；
+        // 无 taskId 的环境等待（prepare_env）只要带 waitKey 就允许升级一次（每 key 由 browserManager 封顶）。
+        // 过期升级定时器不得因“另有任务在等”就用旧 URL 拉起。
+        shouldEscalate: ({ taskId, waitKey } = {}) => {
+            if (taskId) {
+                const t = taskStore.get(taskId);
+                return !!t && ["launching_browser", "waiting_extension"].includes(t.state);
+            }
+            return !!waitKey;
         },
     });
 
     /** @type {{peer: any, extId: string, version: string, browserFamily: string, agentEnabled: boolean, deviceApproved: boolean, device: any, vip: any, quota: any, helloAt: number} | null} */
     let extensionSession = null;
     let extensionLastSeenAt = 0;
+    /** 最近一次 hello 的 extId（离线时仍用于快照归属判定与 lastKnown/lastSeenAt 透出）。
+     *  初值取自固化配置：Broker 重启后内存丢失，但快照不失效（§5.3），须能按同一 extId 命中。 */
+    let lastExtensionExtId = browserManager.getStatus().config?.extId ?? null;
     /** @type {Map<string, {resolve: (r: any) => void, timer: any}>} */
     const syncPending = new Map();
 
@@ -188,7 +202,13 @@ export function createBroker({
                       quota: extensionSession.quota ?? null,
                       onboarding: buildOnboardingHint(),
                   }
-                : { connected: false, onboarding: buildOnboardingHint() },
+                : {
+                      connected: false,
+                      // 离线仍透出「上次在线」的归属与时间：快照读取（extId 匹配）与 freshness 依赖它们
+                      extId: lastExtensionExtId,
+                      lastSeenAt: extensionLastSeenAt || null,
+                      onboarding: buildOnboardingHint(),
+                  },
         sendTaskStart: (task, { resume = false, preopened = false } = {}) =>
             sendToExtension({
                 type: "task.start",
@@ -202,24 +222,51 @@ export function createBroker({
                 ...(preopened ? { preopened: true } : {}),
             }),
         sendTaskCancel: (taskId) => sendToExtension({ type: "task.cancel", taskId }),
-        syncRequest: (action, params, timeoutMs) =>
-            new Promise((resolve) => {
-                const requestId = crypto.randomUUID();
-                const sent = sendToExtension({ type: "sync.request", requestId, action, params });
-                if (!sent) {
-                    resolve({ ok: false, error: { code: "EXTENSION_OFFLINE", message: "红探扩展未连接" } });
-                    return;
+        // 数据集的 sync 写穿（详细设计 §2.5/§5.2）：成功后覆盖快照 datasets 段；
+        // create/rename 成功后 fire-and-forget 再拉一次 list，保证快照与插件权威一致
+        syncRequest: async (action, params, timeoutMs) => {
+            const result = await rawSyncRequest(action, params, timeoutMs);
+            if (result?.ok) {
+                if (action === "list_datasets") {
+                    snapshotStore.writeDatasets(result.data?.datasets ?? []);
+                    audit.append("snapshot_datasets_refreshed", { count: (result.data?.datasets ?? []).length });
+                } else if (action === "create_dataset" || action === "rename_dataset") {
+                    refreshDatasets();
                 }
-                const timer = setTimeout(() => {
-                    syncPending.delete(requestId);
-                    resolve({
-                        ok: false,
-                        error: { code: "EXTENSION_OFFLINE", message: "扩展响应超时（连接可能不稳定）" },
-                    });
-                }, timeoutMs);
-                syncPending.set(requestId, { resolve, timer });
-            }),
+            }
+            return result;
+        },
     };
+
+    /** 底层 sync.request 透传（不含写穿与副作用），供 syncRequest 包装复用 */
+    function rawSyncRequest(action, params, timeoutMs) {
+        return new Promise((resolve) => {
+            const requestId = crypto.randomUUID();
+            const sent = sendToExtension({ type: "sync.request", requestId, action, params });
+            if (!sent) {
+                resolve({ ok: false, error: { code: "EXTENSION_OFFLINE", message: "红探扩展未连接" } });
+                return;
+            }
+            const timer = setTimeout(() => {
+                syncPending.delete(requestId);
+                resolve({
+                    ok: false,
+                    error: { code: "EXTENSION_OFFLINE", message: "扩展响应超时（连接可能不稳定）" },
+                });
+            }, timeoutMs);
+            syncPending.set(requestId, { resolve, timer });
+        });
+    }
+
+    /**
+     * 主动刷新快照 datasets 段（详细设计 §5.2）：仅在线时发起，失败（离线 / 设备未批准致请求被丢弃）
+     * 静默忽略——不落快照、不告警、不重试、不阻塞主链路。写穿由 syncRequest 包装完成。
+     */
+    function refreshDatasets() {
+        if (!sessionFacade.isConnected()) return;
+        // 写穿与审计由 syncRequest 包装完成，这里只负责触发一次拉取；失败一律静默
+        void sessionFacade.syncRequest("list_datasets", {}, 10_000).catch(() => undefined);
+    }
 
     function buildOnboardingHint() {
         if (!extensionSession) {
@@ -288,6 +335,8 @@ export function createBroker({
         session: sessionFacade,
         browserManager,
         rateLimiter: actionLimiter,
+        snapshotStore,
+        alerts,
         now,
         config: {
             extensionDeadlineMs: config.extensionDeadlineMs,
@@ -341,6 +390,8 @@ export function createBroker({
         if (msg.error?.code === "RESUME_EXHAUSTED") alerts.noteResumeExhausted(task.id);
         alerts.noteTaskSettled(task.id);
         refreshKeepAwake();
+        // 终态后顺带刷新快照（详细设计 §5.2 #3）：插件侧仅读 IndexedDB，成本低；失败静默
+        refreshDatasets();
     }
 
     function BROKER_TERMINAL(taskId) {
@@ -366,6 +417,8 @@ export function createBroker({
         const task = taskStore.createTask({
             kind: "crawl",
             params: { adopted: true, taskId },
+            // 来源按插件上报（详细设计 §2.3/§8.2）：manual = 插件里手动发起的抓取
+            source: msg.source === "manual" ? "manual" : "agent",
         });
         // createTask 生成的 id 与插件侧 taskId 不一致：就地重键到插件侧 id
         taskStore.renameTaskId(task.id, taskId);
@@ -591,6 +644,18 @@ export function createBroker({
         // 浏览器家族/extId 记录（引导期第 1 步）+ 解析固化
         browserManager.recordExtension({ family: extensionSession.browserFamily, extId: extensionSession.extId });
         alerts.noteExtensionConnected();
+        lastExtensionExtId = extensionSession.extId;
+        // 会话快照（详细设计 §5.2 #1）：hello 写 session 段，并主动拉一次 list_datasets 覆盖 datasets 段。
+        // 每次重连都做——同时兜住「用户离线期间手动改过数据」。刷新失败静默
+        snapshotStore.writeSession({
+            extId: extensionSession.extId,
+            browserFamily: extensionSession.browserFamily,
+            vip: extensionSession.vip,
+            quota: extensionSession.quota,
+            lastSeenAt: now(),
+        });
+        audit.append("snapshot_session_written", { extId: extensionSession.extId });
+        refreshDatasets();
         const resolved = browserManager.ensureResolved();
         if (!resolved.ok) {
             audit.append("browser_resolve_pending", { message: resolved.message });
@@ -647,6 +712,8 @@ export function createBroker({
                 tasks: { active: taskStore.activeCount(), total: taskStore.size() },
                 activeTaskId: active?.id ?? null,
                 browser: browserManager.getStatus(),
+                // 只读会话快照诊断（详细设计 §2.5）：exists/refreshedAt/sessionUpdatedAt/datasetCount
+                snapshot: snapshotStore.getStatus(),
                 keepAwakeHeld: keepAwake.isHeld(),
                 recentTasks: taskStore
                     .list({ limit: 5 })
@@ -860,6 +927,8 @@ export function createBroker({
             pairing,
             browserManager,
             keepAwake,
+            alerts,
+            snapshotStore,
             sessionFacade,
             handleExtensionMessage,
             handleHello,

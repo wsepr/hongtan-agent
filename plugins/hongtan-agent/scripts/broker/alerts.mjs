@@ -15,6 +15,8 @@
  */
 
 export const DEFAULT_ALERT_THRESHOLDS = {
+    /** 最近告警环形摘要容量（§9.1：进 xhs_connection_status 的 alerts，仅覆盖当前进程存活期） */
+    digestSize: 10,
     /** 扩展离线多久后告警（§11.6：>10 分钟） */
     extensionOfflineMs: 10 * 60 * 1000,
     /** 在跑任务多久没有进度更新算心跳超时（与插件侧 60s 孤儿判定不同：这里是上报链路视角） */
@@ -32,13 +34,22 @@ export function createAlertMonitor({ now = () => Date.now(), audit, logger = con
     let kickedOldAt = [];
     /** @type {Set<string>} */
     const alertedStalled = new Set();
+    /** 最近告警环形摘要（只保留 kind/at/taskId 白名单字段，**不得含页面上报文本**） */
+    /** @type {Array<{kind: string, at: number, taskId: string|null}>} */
+    const digestRing = [];
 
     function emit(kind, details = {}) {
         audit?.append("alert", { kind, ...details });
         logger.warn?.(`[broker][alert] ${kind}: ${JSON.stringify(details)}`);
+        digestRing.push({ kind, at: now(), taskId: details.taskId ?? null });
+        while (digestRing.length > limits.digestSize) digestRing.shift();
     }
 
     return {
+        /** 最近 N 条告警摘要（时间升序）；只覆盖当前进程存活期，跨重启历史只能查 audit.jsonl */
+        digest() {
+            return digestRing.map((entry) => ({ ...entry }));
+        },
         /** 扩展（重新）握手成功 */
         noteExtensionConnected() {
             extensionOfflineSince = null;

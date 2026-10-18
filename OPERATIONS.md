@@ -81,9 +81,12 @@ curl http://127.0.0.1:17373/health
 | `browser_recorded` / `browser_resolved` / `browser_resolve_pending` / `browser_profile_resolved` / `browser_launch` / `browser_launch_skipped` / `browser_launch_escalated` / `browser_launch_escalation_skipped` / `browser_spawn_error` / `browser_launch_error` | 浏览器拉起留痕（§10.7 安全边界；`browser_launch_skipped` = 吻痕/进程探测命中跳过（`reason: recent-contact \| process-running`），`browser_launch_escalated` = skip 30s 后强制拉起一次（每任务封顶），`browser_launch_escalation_skipped` = 到期已回连（`reason: contact-refreshed`）或无等待任务（`no-pending-task`）而不升级，见《常驻工作区设计方案》§5.2） |
 | `adapter_registered` / `adapter_register_rejected` | Adapter 设备签名握手 |
 | `tool_call` | 工具调用（不含敏感参数） |
+| `snapshot_session_written` / `snapshot_datasets_refreshed` | 只读快照落盘（`session-snapshot.json`）：hello 写会话摘要、数据集列表刷新（hello 后主动拉 / sync 写穿 / 任务终态）。**只记条数与时间，不记数据集内容** |
 | `quota_rejected` / `rate_limited` | 配额**预检**拒绝（Broker 按插件上报的快照拦截，带 `readyAt`/`reason`；判定与结算在插件侧，§10.5）/ action 级限流 |
 | `alert` | **告警事件**（`kind` 见下；已实现，落审计便于事后复盘） |
 | `task_resumed` | 用户确认后的显式续接（`xhs_start_crawl { resumeTaskId }`） |
+| `env_prepare` | 「环境就绪」工具 `xhs_prepare_env` 被调用（纯唤醒：不建任务、不占单飞、不耗配额）；带 `reason` 与拉起结果 |
+| `task_query_launch` | 任务查询（`xhs_task_status` / `xhs_task_list`）命中「账本有活跃任务 + 扩展离线」时的**修复式拉起**（reason=`task-query`）；`launched` 字段区分"真正发起"与"被防抖/进程探测跳过"（后者带 `skippedReason`） |
 | `task_cancel_forced` | 插件明确「本机没有该任务」（`NO_ACTIVE_TASK` / `TASK_ID_MISMATCH`）→ 账本强制收敛为 `canceled`（脏状态清理） |
 
 `task_result` 现在带 `errorCode` / `resumeCount` / `durationMs` / `datasetId` / `hostKey` / `deviceId` / `summary`（§11.1 可归因）；`task_created` 带 `tool`。
