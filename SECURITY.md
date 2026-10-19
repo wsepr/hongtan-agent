@@ -53,6 +53,18 @@ Broker 启动浏览器必须满足全部约束：
 3. **URL 白名单**：拉起命令携带的 URL 仅允许 `https://*.xiaohongshu.com` 域内 URL 或空白页（防被滥用为钓鱼跳转）。
 4. **每次拉起写入审计日志**（时间、浏览器家族、profile、URL、触发原因）。
 5. 拉起动作**幂等**（30s 防抖；浏览器已运行时等效开窗），不做进程状态探测。
+6. **拉起命令附带消遮挡/消节流开关**（`--disable-features=CalculateNativeWinOcclusion`、`--disable-background-timer-throttling`、`--disable-renderer-backgrounding`、`--disable-backgrounding-occluded-windows`）：让抓取窗口被别的窗口盖住时不再被判 `hidden` 而停摆（真机实测对照成立）。连带后果=该浏览器会话所有标签页不被后台降级（CPU/耗电略增），已在设计文档 §10.7 声明。
+
+### 5.1 窗口前台化能力边界（方案 B）
+
+扩展侧无法把窗口切到系统前台（Chromium 拒绝非用户手势的聚焦请求，只闪任务栏，真机实测），故由 Broker 以 OS 级方式执行（`broker/browser/activate-window.mjs`）。该能力必须满足全部约束：
+
+1. **只针对引导期固化的浏览器家族**：目标窗口的进程映像名白名单取自 `browser.json` 的 `family`（经家族表映射，如 edge→`msedge.exe`）；家族未知一律拒绝（`unknown-family`），不猜测、不递归枚举。
+2. **窗口定位只用「类名 + 家族映像名 + 标题子串」**：不接受窗口 id、exe 路径、任意命令；标题提示仅作子串匹配（不区分大小写）。实测教训：IDE/Electron 应用的窗口类名同样是 `Chrome_WidgetWin_1`，只按类名匹配会误伤。
+3. **无命令拼接注入面**：Windows 脚本是本模块内的**静态字符串常量**（standalone 运行时也不落盘读取），经 `-EncodedCommand`（base64/UTF-16LE）传递，参数只经环境变量传入；macOS/Linux 的应用名/家族名同样取自家族表常量。
+4. **每次调用写入审计**（`window_activate`：family / hintSource / hintLen / ok / reason）——**不落标题原文**：hint 可能是页面可见文本（标签页标题），按契约隐私红线只进工具响应，不得落 `tasks.json` / `audit.jsonl`。
+5. **失败一律降级、不重试、不提权**：helper 缺失（无 PowerShell/osascript/wmctrl/xdotool）、超时、系统拒绝前台化时，如实返回 `reason` 并让插件闪任务栏提示用户手动点击窗口；不做任何 UI 注入以外的系统操作（不修改注册表、不写系统设置）。
+6. **抢焦点只在用户显式请求时发生**：仅 `xhs_activate_window` 调用触发（SKILL 要求先征询用户），运行期不自动执行。
 
 ## 6. 任务与配额
 
@@ -77,6 +89,6 @@ Broker 启动浏览器必须满足全部约束：
 |---|---|---|
 | 1 | **版本错位窗口**：新 Broker + 旧插件 = 新任务无节奏配额 | 配额判定已下沉插件侧（随商店自动更新分发，窗口短）；旧 Broker + 新插件 = 双闸门（保守无害）。插件侧配额状态随 `chrome.storage.local` 持久化，不再有「Broker 重启丢配额」问题。 |
 | 2 | 本机攻击面随 Broker 常驻而扩大 | 已在 §2/§5 逐条约束；无法在「本机已失守」前提下提供更强保证。 |
-| 3 | 抓取窗口在用户遮挡/最小化时**暂停** | M3 实测：hidden 态懒加载停摆。已通过「窗口激活」产品契约 + 停摆可见化（`stalled_by_background`）管理；非安全风险，列此以便运维排查。 |
+| 3 | 抓取窗口在用户**最小化**（或系统锁屏）时**暂停** | M3 实测：hidden 态懒加载停摆。**遮挡已消除**：Broker 拉起的浏览器带消遮挡开关（`--disable-features=CalculateNativeWinOcclusion` 等），被别的窗口盖住不再被判 hidden（真机实测：遮挡下进度持续推进并正常终态）。残余=最小化（窗口真的不可见）与锁屏（会话锁定，任何进程都无法置前）、以及 Wayland（不允许外部进程设置焦点）。已通过「窗口激活契约 + 停摆可见化（`stalled_by_background`）+ `xhs_activate_window`（OS 级前台化）」管理；非安全风险，列此以便运维排查。 |
 | 4 | 撤销设备后，页面爬虫按现有逻辑继续跑完 | 授权撤销只终止「上报与自动恢复」，不中断已在页面上执行的抓取循环（插件侧不越权干预爬虫）。 |
 | 5 | 受管运行时的**清单本身不在签名链内** | `runtime.manifest.json` 与 `sha256` 由发布方提供、随接入包分发；若分发链路被替换，攻击者可同时替换二进制与哈希。缓解：marketplace 接入包的分发完整性由 marketplace 侧保证（Phase 3 发布项）；本机不再提供独立校验。 |

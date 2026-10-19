@@ -20,6 +20,7 @@ import { resolveExe } from "./resolve-exe.mjs";
 import { resolveProfile } from "./resolve-profile.mjs";
 import { buildLaunchCommand, LAUNCH_DEBOUNCE_MS } from "./launch-command.mjs";
 import { mergeChildEnvironment } from "./child-env.mjs";
+import { activateWindowOS as activateWindowOSPlatform } from "./activate-window.mjs";
 
 /** 扩展「最近吻痕」窗口：≤60s 时跳过无谓拉起（WS 刚断的典型场景，alarms 会在 ≤30s 内重连） */
 const RECENT_CONTACT_MS = 60_000;
@@ -34,6 +35,8 @@ export function createBrowserManager({
     env = process.env,
     probes = {},
     spawnImpl,
+    /** 前台化 helper 用的捕获型 spawn（可注入；缺省由 activate-window 模块自带实现） */
+    spawnCapture,
     fsImpl = fs,
     audit,
     logger = console,
@@ -329,6 +332,44 @@ export function createBrowserManager({
 
         getStatus() {
             return { launchCount, lastLaunchAt, lastSpawnTaskId, pendingEscalations: escalationTimers.size, config: readConfig() };
+        },
+
+        /**
+         * OS 级把抓取窗口切到系统前台（方案 B）。
+         *
+         * 为什么在这里：扩展侧的 `chrome.windows.update({focused:true})` 被 Chromium 的
+         * focus-stealing prevention 拒绝（实测只闪任务栏），只有 Broker 这种独立进程直接调
+         * Win32 才能真正置前。家族取 `browser.json` 的固化值（未知家族一律拒绝，不猜测），
+         * 目标窗口按「家族映像名白名单 + 标题子串」双重匹配，参数只经环境变量传给 helper。
+         *
+         * 纯尽力而为：失败一律如实返回 reason，由调用方转述给 AI/用户（不重试、不提权）。
+         */
+        async activateWindowOS({ titleHint = null, hintSource = "unknown", timeoutMs } = {}) {
+            const family = readConfig()?.family ?? null;
+            // helper 子进程也要拿到「像正常用户进程」的环境块：Broker 自身常被宿主以精简环境启动
+            // （仓库已知事故：缺 ProgramFiles(x86) 会让浏览器清空扩展设置），缺变量时 helper 可能起不来
+            const helperEnv = mergeChildEnvironment({
+                baseEnv: env,
+                systemEnv: joined.readSystemEnvironment?.() ?? {},
+            });
+            const result = await activateWindowOSPlatform({
+                family,
+                titleHint,
+                platform,
+                env: helperEnv,
+                ...(spawnCapture ? { spawnCapture } : {}),
+                ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+            });
+            // 隐私红线（契约明文）：hint 可能是页面可见文本（标签页标题），只进工具响应，
+            // **不得落 tasks.json / audit.jsonl**——审计只记来源与长度
+            audit?.append("window_activate", {
+                family,
+                hintSource,
+                hintLen: typeof titleHint === "string" ? titleHint.length : 0,
+                ok: result.ok === true,
+                reason: result.reason,
+            });
+            return result;
         },
     };
 }

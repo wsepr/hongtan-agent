@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 1,
-    "toolsVersion": 9,
+    "toolsVersion": 10,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -96,7 +96,7 @@
         },
         "STALLED_BY_BACKGROUND": {
             "message": "抓取窗口被遮挡或最小化，任务已暂停",
-            "aiGuidance": "如实转述「抓取窗口被遮挡或最小化，任务已暂停」，并说明恢复窗口可见后会自动继续。这是中间态，不是失败：不要重试、不要判失败（重试会新建任务而非恢复当前任务，且额外消耗配额）。不要再要求用户「请勿最小化」——最小化只会让任务暂停，不会失败。用户在场且希望立即恢复时，先征询再用 xhs_activate_window 把窗口拉回前台（会抢焦点）。",
+            "aiGuidance": "如实转述「抓取窗口被遮挡或最小化，任务已暂停」，并说明恢复窗口可见后会自动继续。这是中间态，不是失败：不要重试、不要判失败（重试会新建任务而非恢复当前任务，且额外消耗配额）。不要再要求用户「请勿最小化」——最小化只会让任务暂停，不会失败。由本机服务冷启动的浏览器已带消遮挡开关，**被别的窗口盖住不再导致停摆**；真正会被暂停的是「最小化」这类窗口不可见的情况。用户在场且希望立即恢复时，先征询再用 xhs_activate_window 把窗口拉回前台（会抢焦点）；若该工具回 activated=false，请用户点击任务栏中闪烁的浏览器窗口，不要反复重试。",
             "retryable": false
         },
         "QUOTA_EXCEEDED": {
@@ -260,7 +260,7 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时把该窗口带到前台；采集期间若该窗口被遮挡或最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡/最小化（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持续跑**：resumeTaskId 指向手工任务会返回 RESUME_NOT_APPLICABLE（文案「手工任务不支持续跑，请重新发起」），失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡/最小化（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持续跑**：resumeTaskId 指向手工任务会返回 RESUME_NOT_APPLICABLE（文案「手工任务不支持续跑，请重新发起」），失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -425,7 +425,7 @@
         {
             "name": "xhs_activate_window",
             "kind": "sync",
-            "description": "把红探插件当前受管的抓取窗口拉回前台（窗口恢复 normal + focused，并激活抓取标签页）。用于 `stalled_by_background`（窗口被遮挡/最小化）时的主动补救。注意：会抢夺用户焦点——无人值守场景适用；有人在用电脑时先向用户确认。窗口已关闭、无受管窗口，或任务已进入终态（受管窗口引用已释放）时返回 activated=false（应走恢复链路，而不是反复重试本工具）。扩展离线返回 EXTENSION_OFFLINE。无参数。",
+            "description": "把红探插件的抓取窗口切到系统前台（`stalled_by_background` 窗口被遮挡/最小化时的主动补救）。前台化由**本机服务用 OS 级方式**执行：Windows 走 Win32 恢复+置前（插件/扩展自身做不到——Chromium 会拒绝聚焦请求，只闪任务栏，真机实测确认）、macOS 激活整个浏览器应用、Linux X11 用 wmctrl/xdotool、Wayland 不支持（返回 unsupported-platform）。插件侧会同时尽力激活抓取标签页并回读事实。响应：activated=true 表示已确证窗口切到系统前台；activated=false 时 reason 取值 no-managed-window（无受管窗口，任务多半已终态或窗口已关，此时不会去猜窗口）/ window-not-found（按标题提示找不到目标窗口）/ ambiguous-window（命中多个窗口，不猜）/ tab-not-active（窗口已在前台但抓取标签页未激活，页面仍可能不可见）/ foreground-denied（系统拒绝前台化）/ helper-missing（本机缺 PowerShell/osascript/wmctrl/xdotool）/ timeout / unsupported-platform；另含 hint（定位窗口用的标题提示）、window{hwnd,candidates}、plugin{activated,windowId,reason}（插件侧那一步的结果）与 message（可直接向用户转述）。失败时插件会闪任务栏提示窗口位置——如实告知用户「请点击任务栏中闪烁的浏览器窗口」，**不要反复重试本工具**（重试不改变系统判定）。注意：成功时会抢夺用户焦点——无人值守场景适用；有人在用电脑时先向用户确认。扩展离线返回 EXTENSION_OFFLINE。无参数。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},

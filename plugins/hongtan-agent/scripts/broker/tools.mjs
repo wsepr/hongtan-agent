@@ -383,6 +383,65 @@ export function createToolExecutor({
         return { triggered: true, taskId: active.id, launched: attempted, skippedReason };
     }
 
+    /** 标题提示回退：活跃任务的 keyword（noteUrl 任务标题未知 → 由调用方再兜底域名词） */
+    function activeTaskHint() {
+        const keyword = taskStore.activeTask()?.params?.keyword;
+        return typeof keyword === "string" && keyword.trim() !== "" ? keyword.trim() : null;
+    }
+
+    /**
+     * 方案 B：把抓取窗口切到系统前台（《抓取窗口前台化与后台不停摆 实施方案》）。
+     *
+     * 扩展侧做不到——Chromium 会拒绝非用户手势的聚焦请求，回落成「闪任务栏」（真机实测：
+     * `minimized→normal+focused`、`fullscreen→normal+focused` 等状态转换 hack 亦全部失败）。
+     * 故插件那一步只作**尽力而为**（激活标签页 + windows.update）并回传窗口提示，
+     * 真正生效的是随后 Broker 的 OS 级调用（Windows Win32 / macOS osascript / Linux X11 wmctrl）。
+     *
+     * 两个边界：① 插件离线时不做 OS 调用（此时没有在跑的任务，抢焦点只会打扰用户）；
+     * ② 无受管窗且无活跃任务时也不做——否则只能拿域名词去猜，可能把**用户自有的**小红书窗口抢到前台。
+     */
+    async function toolActivateWindow() {
+        const sync = await syncRequest("window_activate", {});
+        if (sync?.ok === false) return sync;
+        const plugin = sync?.data ?? null;
+        const pluginHint = typeof plugin?.titleHint === "string" && plugin.titleHint.trim() !== "" ? plugin.titleHint.trim() : null;
+        const taskHint = activeTaskHint();
+        const hasActiveTask = taskStore.activeTask() !== null;
+        const hint = pluginHint ?? taskHint ?? (hasActiveTask ? "小红书" : null);
+        const hintSource = pluginHint ? "plugin" : taskHint ? "task-keyword" : hint !== null ? "domain" : "none";
+        const pluginBlock = plugin
+            ? { activated: plugin.activated === true, windowId: plugin.windowId ?? null, reason: plugin.reason ?? null }
+            : null;
+
+        if (hint === null) {
+            return ok({
+                activated: false,
+                reason: plugin?.reason ?? "no-managed-window",
+                hint: null,
+                hintSource: "none",
+                window: { hwnd: null, candidates: null },
+                plugin: pluginBlock,
+                message: "当前没有受管的抓取窗口（任务可能已结束），未做前台化",
+            });
+        }
+
+        const os = (await browserManager?.activateWindowOS?.({ titleHint: hint, hintSource })) ?? {
+            ok: false,
+            reason: "unsupported-platform",
+        };
+        return ok({
+            activated: os.ok === true,
+            reason: os.ok ? null : os.reason,
+            hint,
+            hintSource,
+            window: { hwnd: os.hwnd ?? null, candidates: os.candidates ?? null },
+            plugin: pluginBlock,
+            message: os.ok
+                ? "抓取窗口已切到系统前台"
+                : `未能把抓取窗口切到前台（${os.reason}）：请点击任务栏中闪烁的浏览器窗口继续抓取`,
+        });
+    }
+
     async function toolStartCrawl(args) {
         // 显式续接（§8.3）：resumeTaskId 优先于一切参数——它不是新任务，只是把暂停中的任务推回运行
         const resumeTaskId = typeof args?.resumeTaskId === "string" && args.resumeTaskId.trim() !== "" ? args.resumeTaskId.trim() : null;
@@ -712,7 +771,7 @@ export function createToolExecutor({
             case "xhs_cancel_task":
                 return toolCancelTask(args);
             case "xhs_activate_window":
-                return syncRequest("window_activate", {});
+                return await toolActivateWindow();
             default:
                 return err("UNKNOWN_TOOL", `未知工具: ${tool}`);
         }
