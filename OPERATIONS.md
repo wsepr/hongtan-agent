@@ -117,9 +117,9 @@ curl http://127.0.0.1:17373/health
 | 工具返回 `BROWSER_OFFLINE` | 本机服务正在拉起浏览器；若持续不回，确认浏览器可执行文件路径未漂移（查看 `browser.config`） |
 | 工具返回 `EXTENSION_OFFLINE` | 浏览器在跑但扩展未连。检查插件「Agent 接管」开关是否开启；SW 由 `alarms`（0.5 分钟）自愈重连，等一轮再查 |
 | 工具返回 `EXTENSION_UNAVAILABLE` | 拉起浏览器 90s 后仍无连接。检查扩展是否安装/启用、设备是否已批准 |
-| 任务反复中断 | 每次中断都是终态 `failed(TASK_INTERRUPTED)`（`error.reason` 归因），**不会自动恢复**；提示用户重新发起任务，并排查浏览器/页面环境（同一任务最多建议重试一次） |
+| 任务反复中断 | **终态**中断（页面被关/离开站点/心跳超时/浏览器重启，以及「暂停 10 分钟内始终未恢复可见的兜底收尾」）都会记 `failed(TASK_INTERRUPTED)`（`error.reason` 归因），**不会自动恢复**；提示用户重新发起任务，并排查浏览器/页面环境（同一任务最多建议重试一次）。窗口被遮挡/最小化的 `stalled_by_background` 只是暂停——**调 `xhs_activate_window` 或请用户点任务栏窗口让它恢复可见即自动继续**，不在此列 |
 | 任务终态为 `failed/BLOCKED_BY_RISK` | 风控/验证码，任务不可复活、**不自动重试**。用户在浏览器处理完后，用原参数（同 keyword 与 datasetName、`articleLimit=remaining`、`skipExistingArticles=true`）新开任务 |
-| 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。恢复窗口可见即自动继续；v2.12 起不再自动还原/抢焦点。用户在场时先征询再调 `xhs_activate_window` 拉回前台；超过 10 分钟未恢复会终态化为 `failed/TASK_INTERRUPTED(stalled_timeout)`，届时按失败后重试流程处理 |
+| 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。**把窗口恢复可见即自动继续**（**同一任务**，不新开；首选调 `xhs_activate_window` 抢回前台，或请用户点任务栏窗口）；v2.12 起不再自动还原/抢焦点。用户在场时先征询再调 `xhs_activate_window` 拉回前台；**10 分钟内一直未恢复可见**才会被兜底终态化为 `failed/TASK_INTERRUPTED(stalled_timeout)`（根因仍是窗口最小化/遮挡），届时按失败后重试流程处理 |
 | 工具返回 `RATE_LIMITED` | action 级限流触发（默认 60 次/分钟/工具）。等提示的秒数后重试；轮询间隔应 ≥10 秒 |
 | 工具返回 `BROKER_UNREACHABLE` / `BROKER_ERROR` | Broker 进程被杀或崩溃。adapter 会**自动重新拉起并重发该次调用**（连接类失败才重发，超时类不重发以免工具被执行两次）；若反复出现，按宿主 stderr 告警指引手动启动 `node scripts/broker-server.mjs` 并查看其输出 |
 | 扩展重载后旧页面无响应 | 扩展重载会使已存在页面的 content script 成为孤儿上下文。该场景由心跳超时收敛覆盖：任务终态为 `failed/TASK_INTERRUPTED`，继续抓取需用原参数新开任务 |

@@ -3,7 +3,7 @@
  *
  * - 状态机（v3）：queued → launching_browser → waiting_extension → running → 终态，
  *   唯一中间态 stalled_by_background（遮挡/最小化暂停，恢复可见自愈）；
- *   interrupted / blocked_by_risk / partial 已删除：中断与风控一律终态失败，任务不可复活；
+ *   interrupted / blocked_by_risk / partial 已删除：终态中断与风控一律终态失败，任务不可复活；
  * - 账本：JSON 文件落盘（原子写），24h TTL watchdog 清理；seq 单调递增；
  * - 旧状态只读归一化（D9）：load 时把旧落盘记录映射为新语义，不迁移原文；
  * - 依赖注入（fs/now/logger），可单测。
@@ -56,7 +56,7 @@ export function normalizeLegacyTask(task) {
         normalized.state = "failed";
         normalized.error = {
             code: "TASK_INTERRUPTED",
-            message: "历史记录：旧版本按数据集写入上限提前结束（该上限已移除）",
+            message: "任务提前结束（历史记录）",
         };
     } else if (task.state === "interrupted") {
         if (originalTarget > 0 && articles >= originalTarget) {
@@ -65,12 +65,12 @@ export function normalizeLegacyTask(task) {
             normalized.state = "failed";
             normalized.error = {
                 code: "TASK_INTERRUPTED",
-                message: "历史记录：任务在旧版本中断（当时未记录中断原因）",
+                message: "任务中断（历史记录，未记录原因）",
             };
         }
     } else if (task.state === "blocked_by_risk") {
         normalized.state = "failed";
-        normalized.error = { code: "BLOCKED_BY_RISK", message: "历史记录：任务在旧版本因风控阻断" };
+        normalized.error = { code: "BLOCKED_BY_RISK", message: "任务因风控中断（历史记录）" };
     }
     return normalized;
 }

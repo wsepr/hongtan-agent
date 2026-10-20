@@ -450,7 +450,7 @@ export function createToolExecutor({
         if (typeof args?.resumeTaskId === "string" && args.resumeTaskId.trim() !== "") {
             return err(
                 "INVALID_ARGS",
-                "续跑已下线，请用原参数新开任务：同 keyword 与 datasetName，articleLimit=剩余篇数（snapshot.remaining），skipExistingArticles=true，其余 config 沿用"
+                "不支持 resumeTaskId 参数；请用 keyword 或 noteUrl 加 articleLimit 新开任务（articleLimit 必填 1-500，续抓剩余量可用快照的 remaining）"
             );
         }
 
