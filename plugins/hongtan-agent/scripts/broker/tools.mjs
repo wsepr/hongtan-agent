@@ -248,6 +248,9 @@ export function createToolExecutor({
                 deviceApproved: info?.deviceApproved ?? null,
             },
             pairing: info?.pairing ?? null,
+            // 占用通道（独占租约）：AI 必须能说清"任务会在哪个浏览器执行"，
+            // 否则用户在 Chrome 里等一个正在 Edge 里跑的任务。
+            channel: session.activeChannel?.() ?? null,
             vip: info?.vip
                 ? {
                       isVip: info.vip.isVip,

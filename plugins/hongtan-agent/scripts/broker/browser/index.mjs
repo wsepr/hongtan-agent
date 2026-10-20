@@ -147,18 +147,36 @@ export function createBrowserManager({
                 profileDir,
                 userDataRoot,
                 resolvedAt: now(),
+                /**
+                 * 本次解析**针对哪个家族/扩展 ID**。为什么要单独记：config.family 会被
+                 * `recordExtension` 随每次 hello 覆盖，而 exe/profileDir 是解析产物——
+                 * 只看 "exe 非空 + profileResolved" 会把上一家族的 exe 当成有效值，
+                 * 于是用户从 Edge 迁到 Chrome 后，离线拉起仍然打开 Edge。
+                 * profileDir 的反查以 extId 为键，因此 extId 变化同样要重解析。
+                 */
+                resolvedForFamily: family,
+                resolvedForExtId: extId,
             },
         };
     }
 
     /** 引导期解析并固化配置（层 2/3/4）。成功后运行期零探测。
-     *  v2.10：profile 反查失败不再阻塞固化——exe 解析成功即固化（profileDir 可为 null = 裸拉起）。 */
+     *  v2.10：profile 反查失败不再阻塞固化——exe 解析成功即固化（profileDir 可为 null = 裸拉起）。
+     *  v2.11：解析结果与「家族 + extId」绑定——任一变化（用户换浏览器 / 重装换目录）必须重解析，
+     *         否则拉起错误浏览器、或 profileDir 指向扩展已不在的旧档案；
+     *         旧版 browser.json 没有这两个字段，视为失效自动迁移一次。 */
     function ensureResolvedImpl() {
         const config = readConfig();
         if (!config?.family || !config?.extId) {
             return { ok: false, message: "浏览器家族/extId 未记录（等待扩展 hello）" };
         }
-        if ((config.exe || config.kind === "open-b") && (config.profileResolved || config.profileDir)) {
+        const resolvedForCurrentChannel =
+            config.resolvedForFamily === config.family && config.resolvedForExtId === config.extId;
+        if (
+            resolvedForCurrentChannel &&
+            (config.exe || config.kind === "open-b") &&
+            (config.profileResolved || config.profileDir)
+        ) {
             return { ok: true, config };
         }
         const resolved = resolveAll({ family: config.family, extId: config.extId });
@@ -297,9 +315,14 @@ export function createBrowserManager({
         recordExtension({ family, extId }) {
             const config = readConfig();
             if (config && config.family === family && config.extId === extId) return config;
+            // 只记录"变了"，**不清空已解析的 exe/profile**：
+            // 失效判定已由 ensureResolvedImpl 的 resolvedForFamily/resolvedForExtId 负责，
+            // 提前清空只会在"新家族解析失败"时把可用配置一起丢掉（从能拉起变成完全拉不起）。
+            // 解析成功时 writeConfig 自然覆盖旧值；解析失败时磁盘保留上次可用配置，便于排障。
+            const invalidated = !!config && (config.family !== family || config.extId !== extId);
             const next = { ...(config ?? {}), family, extId, recordedAt: now() };
             writeConfig(next);
-            audit?.append("browser_recorded", { family, extId });
+            audit?.append("browser_recorded", { family, extId, invalidated });
             return next;
         },
 

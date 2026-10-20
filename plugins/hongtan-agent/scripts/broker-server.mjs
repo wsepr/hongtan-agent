@@ -24,6 +24,7 @@ import { createAlertMonitor } from "./broker/alerts.mjs";
 import { createHandshakeBackoff, extIdFromOrigin } from "./broker/handshake-backoff.mjs";
 import { createAudit } from "./broker/audit.mjs";
 import { createPairing } from "./broker/pairing.mjs";
+import { createActiveChannelStore, channelKeyOf, ACTIVE_CHANNEL_FILE } from "./broker/active-channel.mjs";
 import { createToolExecutor, buildTaskLaunchUrl } from "./broker/tools.mjs";
 import { createSessionSnapshotStore } from "./broker/session-snapshot.mjs";
 import { createBrowserManager } from "./broker/browser/index.mjs";
@@ -92,6 +93,27 @@ export function createBroker({
     const handshakeBackoff = createHandshakeBackoff({ now });
 
     const audit = createAudit({ filePath: config.auditPath, now });
+    /**
+     * 独占通道租约：同一时刻只有一个浏览器接管红探（详见 broker/active-channel.mjs）。
+     * 放在这里而非 handleHello 内部，是因为健康检查、工具响应与 HTTP 重置都要读同一份状态。
+     */
+    const activeChannel = createActiveChannelStore({
+        filePath: path.join(config.stateDir, ACTIVE_CHANNEL_FILE),
+        now,
+        logger,
+    });
+    /**
+     * takeover 限流（60s 窗口）。扩展没有身份， broker 无法密码学校验"确实是用户点的"，
+     * 于是退而求其次：给这个动作加上可观测 + 有上限，避免本机异常进程把它刷成抖动。
+     */
+    const MAX_TAKEOVER_PER_MINUTE = 5;
+    /** @type {number[]} */
+    const takeoverAttempts = [];
+    function noteTakeoverAttempt(at) {
+        takeoverAttempts.push(at);
+        while (takeoverAttempts.length > 0 && at - takeoverAttempts[0] > 60_000) takeoverAttempts.shift();
+        return takeoverAttempts.length;
+    }
     // §11.6 告警监控：把「会静默自愈」的问题升级为可归因告警（离线超时 / 心跳停摆 / 恢复耗尽 / 连接风暴）
     // digestSize：进 connection_status 的最近告警摘要（§9.1，仅覆盖当前进程存活期）
     const alerts = createAlertMonitor({ now, audit, logger, thresholds: { digestSize: 10, ...(config.alertThresholds ?? {}) } });
@@ -178,6 +200,8 @@ export function createBroker({
 
     const sessionFacade = {
         isConnected: () => !!(extensionSession?.peer?.isOpen),
+        /** 当前占用通道（脱敏：不含 channelKey）；无占用者时为 null —— AI 据此回答"任务会在哪个浏览器执行" */
+        activeChannel: () => activeChannel.describePublic(),
         extensionInfo: () =>
             extensionSession
                 ? {
@@ -500,6 +524,8 @@ export function createBroker({
             return;
         }
         extensionLastSeenAt = now();
+        // 占用者的任何已识别消息都刷新租约在线时间（节流落盘）；待机方的消息到不了这里
+        if (extensionSession?.peer === peer) activeChannel.touch();
 
         // 未完成 hello：仅接受 challenge/proof 与 hello
         if (beforeHello) {
@@ -518,6 +544,23 @@ export function createBroker({
         }
 
         switch (msg.type) {
+            case "channel.release": {
+                // 占用者主动让出（插件关闭开关时先发本帧再断连）。
+                // 能走到这里说明 peer 已是当前会话本人（beforeHello 分支已 return），
+                // 因此这条"让出"天然绑定连接所有权，不需要任何共享密钥。
+                if (!extensionSession || extensionSession.peer !== peer) {
+                    audit.append("ws_unknown_message", { type: msg.type, reason: "not-session-owner" });
+                    break;
+                }
+                const released = activeChannel.describe();
+                activeChannel.release();
+                audit.append("channel_released", {
+                    channelKey: released?.channelKey ?? null,
+                    family: released?.family ?? null,
+                    reason: typeof msg.reason === "string" ? msg.reason : null,
+                });
+                break;
+            }
             case "extension.ping":
                 peer.send({ type: "server.pong" });
                 break;
@@ -616,25 +659,98 @@ export function createBroker({
             peer.close(4002, "protocol version mismatch");
             return;
         }
-        // 撤销留痕（§11.1）：同一设备此前已批准、本次重连却报告未批准 → 判定为插件侧已撤销
-        if (
-            extensionSession &&
-            extensionSession.deviceId &&
-            msg.deviceId === extensionSession.deviceId &&
-            extensionSession.deviceApproved === true &&
-            msg.deviceApproved === false
-        ) {
+        // ---- 独占通道租约 ----
+        // 规则：无占用者 → 首个 hello 即占用（开关本身就是用户的显式动作）；
+        // 同一通道重连 → 续期；其余一律拒绝，只有用户点了「切换到此浏览器」带来的
+        // takeover 才能转移租约。离线占用者同样受保护——休眠/SW 回收造成的短暂离线
+        // 不应让另一个浏览器自动抢占（否则又回到"谁后连谁赢"）。
+        const incomingKey = channelKeyOf(msg);
+        const lease = activeChannel.describe();
+        // 同一浏览器换了通道标识：storage 抖动回退到"不带 key"后恢复，或用户清空扩展数据
+        // 重建了实例 id。只允许在**旧租约已离线**时改键——在线仍拒绝，避免同一浏览器的
+        // 两个 profile 互相顶替；跨浏览器（family 不同）永远不算"同一浏览器"。
+        // 注意 family 两端都可能为 null：那时 channelKey 也会同为 `family:unknown`，
+        // 于是 keyRotated 因"键相同"而不成立——这份安全依赖 channelKeyOf 的默认值，
+        // 改那个默认值时必须回头看这里。
+        const sameBrowser =
+            !!lease && lease.extId === (msg.extId ?? null) && lease.family === (msg.browserFamily ?? null);
+        const keyRotated = sameBrowser && lease.channelKey !== incomingKey && !lease.online;
+        if (keyRotated) {
+            // 带上批准态：改键路径不满足 device_revoked 的同通道条件，批准态若同时丢失
+            // （清空扩展数据必然如此）只有这里能留下证据。
+            audit.append("channel_rekeyed", {
+                from: lease.channelKey,
+                to: incomingKey,
+                family: lease.family,
+                prevApproved: lease.approved,
+                nowApproved: msg.deviceApproved === true,
+            });
+        }
+        const wantsTakeover = msg.takeover === true && !!lease && lease.channelKey !== incomingKey;
+        // 抢通道限流：防止本机异常进程反复 takeover 把两个浏览器刷成抖动（用户正常最多点两三次）
+        const isTakeover = wantsTakeover && noteTakeoverAttempt(now()) <= MAX_TAKEOVER_PER_MINUTE;
+        // 被限流与"被别人占用"在协议上原本长得一模一样，用户点了没反应会以为界面坏了。
+        // 用一个显式字段区分，让插件能说"操作太频繁"而不是重复"Edge 正在使用"。
+        const throttled = wantsTakeover && !isTakeover;
+        if (throttled) {
+            audit.append("channel_takeover_throttled", { incomingKey, activeChannelKey: lease.channelKey });
+        }
+        const granted = !lease || lease.channelKey === incomingKey || isTakeover || keyRotated;
+        if (!granted) {
+            // 还剩多久窗口才滑过去：客户端据此倒计时，避免"手动刷新 → 限流显示被抹掉 → 再点又被拒"
+            const retryAfterMs = throttled
+                ? Math.max(1_000, 60_000 - (now() - (takeoverAttempts[0] ?? now())))
+                : undefined;
+            peer.send({
+                type: "session.occupied",
+                activeFamily: lease.family ?? "unknown",
+                activeSince: lease.since,
+                activeOnline: lease.online,
+                ...(throttled ? { throttled: true, retryAfterMs } : {}),
+                message: throttled ? "切换操作过于频繁" : "这台红探客户端正被另一个浏览器使用",
+            });
+            // 与 channel_takeover_throttled 是同一次拒绝的两条留痕（后者带 activeChannelKey），
+            // 统计"被拒绝次数"时不要重复计数
+            audit.append("channel_occupied", {
+                incomingKey,
+                incomingFamily: msg.browserFamily ?? null,
+                activeFamily: lease.family ?? null,
+                activeOnline: lease.online,
+                ...(throttled ? { throttled: true } : {}),
+            });
+            peer.close(4004, "occupied");
+            return;
+        }
+        // 撤销留痕（§11.1）：用**租约里记录的上一次批准态**判断，不依赖内存会话。
+        // 真实撤销是 `rehandshake()`：先 close 再 connect，broker 的 onClose 早已把
+        // extensionSession 置空——依赖它会漏记，且是否漏记取决于 close 与新 hello 的先后。
+        // 不能只看 deviceId：整机只有一份设备身份，Edge 与 Chrome 的 deviceId 必然相同。
+        if (lease?.channelKey === incomingKey && lease.approved === true && msg.deviceApproved === false) {
             audit.append("device_revoked", { deviceId: msg.deviceId, extId: msg.extId ?? null });
         }
         if (extensionSession && extensionSession.peer && extensionSession.peer !== peer) {
-            audit.append("kicked_old", { extId: extensionSession.extId });
-            alerts.noteKickedOld();
+            audit.append("kicked_old", {
+                extId: extensionSession.extId,
+                reason: isTakeover ? "switched" : "reconnected",
+                toChannel: incomingKey,
+            });
+            // 只有「换浏览器」才算连接风暴；同一浏览器重连（SW 被回收）不该触发告警
+            if (isTakeover) alerts.noteKickedOld();
             try {
-                extensionSession.peer.close(4000, "replaced");
+                extensionSession.peer.close(4000, isTakeover ? "switched" : "reconnected");
             } catch {
                 /* 旧连接已死 */
             }
         }
+        if (isTakeover) {
+            audit.append("channel_switched", { from: lease.channelKey, fromFamily: lease.family ?? null, to: incomingKey, toFamily: msg.browserFamily ?? null });
+        }
+        activeChannel.claim({
+            channelKey: incomingKey,
+            family: msg.browserFamily ?? null,
+            extId: msg.extId ?? null,
+            approved: msg.deviceApproved === true,
+        });
         extensionSession = {
             peer,
             extId: msg.extId ?? null,
@@ -723,8 +839,13 @@ export function createBroker({
                     connected: sessionFacade.isConnected(),
                     lastSeenAt: extensionLastSeenAt || null,
                 },
+                // 占用通道（脱敏）：UI 与排障据此回答"现在由哪个浏览器接管"
+                channel: activeChannel.describePublic(),
                 tasks: { active: taskStore.activeCount(), total: taskStore.size() },
                 activeTaskId: active?.id ?? null,
+                // 注意 config 里两个字段语义不同：family 是"当前连接方"，exe/profileDir 是
+                // "上次成功解析的结果"，二者可以不一致（换浏览器后尚未重解析）——
+                // 判断解析结果是否当前有效，看 resolvedForFamily / resolvedForExtId。
                 browser: browserManager.getStatus(),
                 // 只读会话快照诊断（详细设计 §2.5）：exists/refreshedAt/sessionUpdatedAt/datasetCount
                 snapshot: snapshotStore.getStatus(),
@@ -779,6 +900,38 @@ export function createBroker({
             adapterTokens.set(token, now() + 24 * 60 * 60 * 1000);
             audit.append("adapter_registered", { hostKey: body.hostKey, displayName: body.displayName });
             reply(res, 200, { ok: true, token });
+            return true;
+        }
+        if (req.method === "POST" && url.pathname === "/v1/channel/reset") {
+            // 只处理**离线/无主**租约（幽灵占用、占用者已退出）。
+            // 在线占用者受保护：否则任意本机进程一条 HTTP 就能打断用户正在用的浏览器，
+            // 而"用户主动让出"有专门通道（WS `channel.release`，由当前会话本人发出）。
+            const body = await readJsonBody(req, res);
+            if (body === null) return true;
+            const before = activeChannel.describe();
+            if (before?.online) {
+                audit.append("channel_reset_rejected", {
+                    reason: "occupied-online",
+                    activeFamily: before.family ?? null,
+                    requested: typeof body?.reason === "string" ? body.reason : null,
+                });
+                reply(res, 409, {
+                    ok: false,
+                    error: {
+                        code: "CHANNEL_OCCUPIED_ONLINE",
+                        message: "占用者仍在线，请使用「切换到此浏览器」而不是重置",
+                    },
+                    channel: activeChannel.describePublic(),
+                });
+                return true;
+            }
+            const released = activeChannel.release();
+            audit.append("channel_reset", {
+                released,
+                previousFamily: before?.family ?? null,
+                reason: typeof body?.reason === "string" ? body.reason : null,
+            });
+            reply(res, 200, { ok: true, released });
             return true;
         }
         if (req.method === "POST" && url.pathname === "/v1/adapters/heartbeat") {
@@ -939,6 +1092,7 @@ export function createBroker({
             audit,
             tools,
             pairing,
+            activeChannel,
             browserManager,
             keepAwake,
             alerts,
