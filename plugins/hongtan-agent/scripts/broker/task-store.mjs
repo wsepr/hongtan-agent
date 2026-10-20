@@ -246,6 +246,16 @@ export function createTaskStore({
                 state: "queued",
                 seq: 0,
                 processed: { articles: 0, comments: 0, images: 0, skippedByBlacklist: 0, skippedExisting: 0 },
+                /**
+                 * 目标总篇数：agent 任务取 AI 请求值，manual（认领）任务由插件上报的 data.total 补齐。
+                 * 手工任务认领时只有 `params: { adopted: true }`，不落这里就永远推不出 remaining。
+                 */
+                targetArticles: Number.isFinite(params?.articleLimit) ? params.articleLimit : null,
+                /** 当前篇目序号（插件 progress 上报） */
+                currentArticle: null,
+                /** 数据集名与抓取目标：manual 任务只能由插件上报才可知（见 noteProgress） */
+                datasetName: null,
+                target: null,
                 visibility: null,
                 blocked: null,
                 effectiveConfig: null,
@@ -335,19 +345,31 @@ export function createTaskStore({
         },
 
         /** 进度上报：seq 必须单调递增；迟到的 progress 为 no-op */
-        noteProgress(taskId, { seq, data, datasetId }) {
+        noteProgress(taskId, { seq, data, datasetId, datasetName, target, effectiveConfig }) {
             const task = tasks.get(taskId);
             if (!task || BROKER_TERMINAL_STATES.has(task.state)) return false;
             if (!Number.isFinite(seq) || seq <= task.seq) return false;
             task.seq = seq;
             // 数据集归属由插件上报（AI 只给名字，重名/改名后按名字无法定位真实 id）→ 供 task_list 过滤
             if (Number.isFinite(datasetId)) task.datasetId = datasetId;
+            // manual 任务的身份事实只能由插件上报（Broker 侧无从解析）：数据集名、抓取目标、生效配置
+            if (typeof datasetName === "string" && datasetName !== "" && datasetName.length <= MAX_DATASET_NAME_LEN) {
+                task.datasetName = datasetName;
+            }
+            if (isTaskTarget(target)) task.target = { type: target.type, value: target.value };
+            if (effectiveConfig && typeof effectiveConfig === "object" && !Array.isArray(effectiveConfig)) {
+                task.effectiveConfig = effectiveConfig;
+            }
             if (data) {
                 if (Number.isFinite(data.articles)) task.processed.articles = data.articles;
                 if (Number.isFinite(data.comments)) task.processed.comments = data.comments;
                 if (Number.isFinite(data.images)) task.processed.images = data.images;
                 if (Number.isFinite(data.skippedByBlacklist)) task.processed.skippedByBlacklist = data.skippedByBlacklist;
                 if (Number.isFinite(data.skippedExisting)) task.processed.skippedExisting = data.skippedExisting;
+                // 目标总篇数与篇目序号：插件侧 total 是钳制后的真实目标，比 AI 请求值更权威
+                // （0 视为尚未得知，不能把已知目标清掉）
+                if (Number.isFinite(data.total) && data.total > 0) task.targetArticles = data.total;
+                if (Number.isFinite(data.current)) task.currentArticle = data.current;
                 if (typeof data.visibility === "string") task.visibility = data.visibility;
                 if (typeof data.message === "string") task.lastMessage = data.message;
             }
@@ -372,6 +394,8 @@ export function createTaskStore({
         },
 
         snapshot(task) {
+            const processed = task.processed;
+            const targetArticles = resolveTargetArticles(task);
             return {
                 taskId: task.id,
                 state: task.state,
@@ -379,23 +403,38 @@ export function createTaskStore({
                 /** 任务来源（详细设计 §2.3）：旧落盘记录缺字段时按 agent 兜底 */
                 source: task.source ?? "agent",
                 params: task.params,
+                /** 抓取目标：manual 任务由插件上报的起始页（type=page），agent 任务可从 params 回退推导 */
+                target: resolveTaskTarget(task),
                 /** 插件解析后的真实数据集 id（AI 给的只是名字；早期失败/未解析时为 null） */
                 datasetId: Number.isFinite(task.datasetId) ? task.datasetId : null,
+                /** 数据集名：manual 任务只有插件上报才有（agent 可回退到 AI 请求名） */
+                datasetName:
+                    typeof task.datasetName === "string" && task.datasetName !== ""
+                        ? task.datasetName
+                        : typeof task.params?.datasetName === "string" && task.params.datasetName !== ""
+                          ? task.params.datasetName
+                          : null,
+                /** 本任务目标总篇数（null = 旧版插件未上报，无法判断是否抓满） */
+                targetArticles,
+                /** 当前篇目序号（null = 旧版插件未上报） */
+                currentArticle: Number.isFinite(task.currentArticle) ? task.currentArticle : null,
                 seq: task.seq,
-                processed: task.processed,
+                processed,
                 visibility: task.visibility,
                 lastMessage: task.lastMessage ?? null,
                 blocked: task.blocked,
                 effectiveConfig: task.effectiveConfig,
                 /**
-                 * 本任务剩余目标（仅展示，不落盘）：articleLimit − 已抓篇数。
-                 * 供 AI 在 failed(TASK_INTERRUPTED/BLOCKED_BY_RISK) 后计算新开任务的 articleLimit。
+                 * 本任务剩余目标：targetArticles − 已抓篇数。
+                 * manual 任务与 agent 任务同口径（手工任务的目标由插件上报，不再恒为 0）。
+                 * 目标未知（旧版插件）时兜底 0，保持历史语义——AI 侧按「已完成」处置，不引入 null。
                  */
-                remaining: Math.max(
-                    0,
-                    (Number.isFinite(task.params?.articleLimit) ? task.params.articleLimit : 0) -
-                        (Number.isFinite(task.processed?.articles) ? task.processed.articles : 0)
-                ),
+                remaining:
+                    targetArticles === null
+                        ? 0
+                        : Math.max(0, targetArticles - (Number.isFinite(processed?.articles) ? processed.articles : 0)),
+                /** Broker 重启后从插件重播认领的任务（此时 createdAt 是认领时刻，不是真实开始时刻） */
+                adopted: task.adoptedFromExtension === true,
                 extensionTabId: task.extensionTabId,
                 /**
                  * 孤儿信号（§8.1 / §6.3 / 详细设计 §2.2）：**全部活跃态**超过 60s 没有新消息 ⇒ 视为已失联，
@@ -406,6 +445,14 @@ export function createTaskStore({
                 orphaned:
                     BROKER_ACTIVE_STATES.has(task.state) &&
                     now() - (task.updatedAt ?? task.createdAt ?? now()) > ORPHAN_TIMEOUT_MS,
+                /** 进入当前状态的时刻：暂停态即停摆起点，终态即结束时刻 */
+                stateChangedAt: Number.isFinite(task.stateChangedAt) ? task.stateChangedAt : null,
+                /** 自账本记录创建以来的时长（活跃任务算到当下，终态算到 updatedAt） */
+                durationMs: Math.max(
+                    0,
+                    (BROKER_TERMINAL_STATES.has(task.state) ? task.updatedAt ?? now() : now()) -
+                        (task.createdAt ?? now())
+                ),
                 error: task.error,
                 summary: task.summary,
                 createdAt: task.createdAt,
@@ -450,6 +497,45 @@ export function createTaskStore({
         },
         size: () => tasks.size,
     };
+}
+
+/** 插件上报字段的长度上限（插件为受信对端，这里只防异常值把账本与响应撑大） */
+const MAX_TARGET_VALUE_LEN = 2048;
+const MAX_DATASET_NAME_LEN = 100;
+
+/** 插件上报的抓取目标形状校验（`{ type, value }` 且两者皆非空字符串、长度受限） */
+const TASK_TARGET_TYPES = new Set(["keyword", "noteUrl", "page"]);
+
+function isTaskTarget(value) {
+    return (
+        !!value &&
+        typeof value === "object" &&
+        TASK_TARGET_TYPES.has(value.type) &&
+        typeof value.value === "string" &&
+        value.value !== "" &&
+        value.value.length <= MAX_TARGET_VALUE_LEN
+    );
+}
+
+/**
+ * 目标总篇数：插件上报的 total（钳制后真实目标）优先，回退 AI 请求的 articleLimit。
+ * manual 任务认领时两者皆缺 → null，由插件首条 progress 补齐。
+ */
+function resolveTargetArticles(task) {
+    if (Number.isFinite(task?.targetArticles) && task.targetArticles > 0) return task.targetArticles;
+    return Number.isFinite(task?.params?.articleLimit) ? task.params.articleLimit : null;
+}
+
+/** 抓取目标：priority 插件上报（manual 的起始页 / agent 的解析结果），回退 AI 请求参数 */
+function resolveTaskTarget(task) {
+    if (isTaskTarget(task?.target)) return { type: task.target.type, value: task.target.value };
+    if (typeof task?.params?.keyword === "string" && task.params.keyword !== "") {
+        return { type: "keyword", value: task.params.keyword };
+    }
+    if (typeof task?.params?.noteUrl === "string" && task.params.noteUrl !== "") {
+        return { type: "noteUrl", value: task.params.noteUrl };
+    }
+    return null;
 }
 
 /** progressHistory 条目的对外紧凑投影（控制响应体积；不改动落盘结构） */

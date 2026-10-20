@@ -573,7 +573,15 @@ export function createBroker({
                 if (taskStore.readoptFromPlugin(msg.taskId, advertisedStateOf(msg.state))) {
                     audit.append("task_readopted", { taskId: msg.taskId, state: advertisedStateOf(msg.state) });
                 }
-                taskStore.noteProgress(msg.taskId, { seq: msg.seq, data: msg.data, datasetId: msg.datasetId });
+                taskStore.noteProgress(msg.taskId, {
+                    seq: msg.seq,
+                    data: msg.data,
+                    datasetId: msg.datasetId,
+                    // manual 任务的身份事实只能由插件上报（认领时 params 里没有关键词/数据集/目标）
+                    datasetName: msg.datasetName,
+                    target: msg.target,
+                    effectiveConfig: msg.effectiveConfig,
+                });
                 const task = taskStore.get(msg.taskId);
                 // 中间态双向跟随：插件上报中间态即落中间态；插件报回 running（遮挡解除 /
                 // 用户过完验证码）也必须同步回 running，否则账本停在中间态，后续终态会被状态机拒绝
