@@ -205,42 +205,40 @@ export function createBroker({
         extensionInfo: () =>
             extensionSession
                 ? {
-                      connected: !!(extensionSession.peer?.isOpen),
-                      lastSeenAt: extensionLastSeenAt || null,
-                      extId: extensionSession.extId,
-                      version: extensionSession.version,
-                      browserFamily: extensionSession.browserFamily,
-                      agentEnabled: extensionSession.agentEnabled,
-                      deviceApproved: extensionSession.deviceApproved,
-                      pairing: pairing
-                          ? {
-                                deviceId: pairing.deviceId,
-                                fingerprint: pairing.fingerprint,
-                                hostKey: pairing.hostKey,
-                                displayName: pairing.displayName,
-                                approved: extensionSession.deviceApproved,
-                            }
-                          : null,
-                      vip: extensionSession.vip,
-                      // 任务节奏配额快照（§10.5，插件侧权威）——派发前预检与 connection_status 共用
-                      quota: extensionSession.quota ?? null,
-                      onboarding: buildOnboardingHint(),
-                  }
+                    connected: !!(extensionSession.peer?.isOpen),
+                    lastSeenAt: extensionLastSeenAt || null,
+                    extId: extensionSession.extId,
+                    version: extensionSession.version,
+                    browserFamily: extensionSession.browserFamily,
+                    agentEnabled: extensionSession.agentEnabled,
+                    deviceApproved: extensionSession.deviceApproved,
+                    pairing: pairing
+                        ? {
+                            deviceId: pairing.deviceId,
+                            fingerprint: pairing.fingerprint,
+                            hostKey: pairing.hostKey,
+                            displayName: pairing.displayName,
+                            approved: extensionSession.deviceApproved,
+                        }
+                        : null,
+                    vip: extensionSession.vip,
+                    // 任务节奏配额快照（§10.5，插件侧权威）——派发前预检与 connection_status 共用
+                    quota: extensionSession.quota ?? null,
+                    onboarding: buildOnboardingHint(),
+                }
                 : {
-                      connected: false,
-                      // 离线仍透出「上次在线」的归属与时间：快照读取（extId 匹配）与 freshness 依赖它们
-                      extId: lastExtensionExtId,
-                      lastSeenAt: extensionLastSeenAt || null,
-                      onboarding: buildOnboardingHint(),
-                  },
-        sendTaskStart: (task, { resume = false, preopened = false } = {}) =>
+                    connected: false,
+                    // 离线仍透出「上次在线」的归属与时间：快照读取（extId 匹配）与 freshness 依赖它们
+                    extId: lastExtensionExtId,
+                    lastSeenAt: extensionLastSeenAt || null,
+                    onboarding: buildOnboardingHint(),
+                },
+        sendTaskStart: (task, { preopened = false } = {}) =>
             sendToExtension({
                 type: "task.start",
                 taskId: task.id,
                 kind: task.kind,
                 params: task.params,
-                // 显式续接（§8.3）：带 resumeOf 的 task.start 让插件把暂停中的任务推回 running
-                ...(resume ? { resumeOf: task.id } : {}),
                 // 预开窗标志（v2.12）：最后一次成功发起的 spawn 属于本任务——深链窗口可能仍在
                 // 创建中（移交/冷启动开窗是异步的），插件收到后应先短暂等待预开窗再兜底自建
                 ...(preopened ? { preopened: true } : {}),
@@ -393,7 +391,7 @@ export function createBroker({
     function applyTaskResult(msg) {
         const task = taskStore.get(msg.taskId);
         if (!task || BROKER_TERMINAL(msg.taskId)) return;
-        const status = ["completed", "partial", "failed", "canceled", "aborted_by_user"].includes(msg.status)
+        const status = ["completed", "failed", "canceled", "aborted_by_user"].includes(msg.status)
             ? msg.status
             : "failed";
         // 终态以插件汇总为准：summary 合入 processed（与 task_status 快照同口径）
@@ -407,25 +405,23 @@ export function createBroker({
             summary: msg.summary ?? null,
             error: msg.error ?? null,
             effectiveConfig: msg.effectiveConfig ?? task.effectiveConfig,
-            ...(Number.isFinite(msg.resumeCount) ? { resumeCount: msg.resumeCount } : {}),
             // 终态也带上数据集归属（插件上报的真实 id，供 task_list 过滤/复盘）
             ...(Number.isFinite(msg.datasetId) ? { datasetId: msg.datasetId } : {}),
         });
         task.processed = mergedProcessed;
         taskStore.persist();
-        // §11.1：终态必须可归因——记录错误码 / 恢复次数 / 耗时 / 数据集归属，便于用户回来复盘
+        // §11.1：终态必须可归因——记录错误码 / 耗时 / 数据集归属，便于用户回来复盘
         audit.append("task_result", {
             taskId: task.id,
             status,
             errorCode: msg.error?.code ?? null,
-            resumeCount: Number.isFinite(msg.resumeCount) ? msg.resumeCount : task.resumeCount,
+            errorReason: msg.error?.reason ?? null,
             datasetId: Number.isFinite(task.datasetId) ? task.datasetId : null,
             durationMs: Math.max(0, now() - (task.createdAt ?? now())),
             hostKey: pairing?.hostKey ?? null,
             deviceId: pairing?.deviceId ?? null,
             summary: msg.summary ?? null,
         });
-        if (msg.error?.code === "RESUME_EXHAUSTED") alerts.noteResumeExhausted(task.id);
         alerts.noteTaskSettled(task.id);
         refreshKeepAwake();
         // 终态后顺带刷新快照（详细设计 §5.2 #3）：插件侧仅读 IndexedDB，成本低；失败静默
@@ -434,15 +430,16 @@ export function createBroker({
 
     function BROKER_TERMINAL(taskId) {
         const t = taskStore.get(taskId);
-        return !t || ["completed", "partial", "failed", "canceled", "aborted_by_user"].includes(t.state);
+        return !t || ["completed", "failed", "canceled", "aborted_by_user"].includes(t.state);
     }
 
     /**
      * 插件上报的状态 → 账本状态（认领与复活共用同一口径，避免两处漂移）。
-     * 不明/缺失状态按 running 处理（插件重播的常态就是 running）。
+     * v3 只认 running / stalled_by_background；旧状态不再透传（插件侧已归一化为终态），
+     * 其余按 running 处理（插件重播的常态就是 running）。
      */
     function advertisedStateOf(state) {
-        return ["interrupted", "blocked_by_risk", "stalled_by_background"].includes(state) ? state : "running";
+        return state === "stalled_by_background" ? state : "running";
     }
 
     /**
@@ -621,19 +618,6 @@ export function createBroker({
                 }
                 break;
             }
-            case "task.recovered":
-                taskStore.noteRecovered(msg.taskId, {
-                    tabId: msg.tabId,
-                    windowId: msg.windowId,
-                    resumeCount: msg.resumeCount,
-                    remaining: msg.remaining,
-                });
-                audit.append("task_recovered", {
-                    taskId: msg.taskId,
-                    resumeCount: msg.resumeCount,
-                    remaining: msg.remaining,
-                });
-                break;
             case "sync.response": {
                 const pending = syncPending.get(msg.requestId);
                 if (pending) {

@@ -1,8 +1,8 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
-    "protocolVersion": 1,
-    "toolsVersion": 10,
+    "protocolVersion": 2,
+    "toolsVersion": 11,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -71,7 +71,7 @@
         },
         "TAB_UNAVAILABLE": {
             "message": "抓取标签页已关闭或不可用",
-            "aiGuidance": "插件会自动恢复；若达到恢复上限将返回 RESUME_EXHAUSTED，届时建议人工检查浏览器。恢复期内人工干预（开新任务/取消）会打断自动恢复。",
+            "aiGuidance": "任务已终态失败（不会自动恢复）。按 TASK_INTERRUPTED 的指引计算剩余量、征得用户同意后用原参数新开任务。重复原样调用结果相同。",
             "retryable": false
         },
         "TASK_BUSY": {
@@ -96,7 +96,7 @@
         },
         "STALLED_BY_BACKGROUND": {
             "message": "抓取窗口被遮挡或最小化，任务已暂停",
-            "aiGuidance": "如实转述「抓取窗口被遮挡或最小化，任务已暂停」，并说明恢复窗口可见后会自动继续。这是中间态，不是失败：不要重试、不要判失败（重试会新建任务而非恢复当前任务，且额外消耗配额）。不要再要求用户「请勿最小化」——最小化只会让任务暂停，不会失败。由本机服务冷启动的浏览器已带消遮挡开关，**被别的窗口盖住不再导致停摆**；真正会被暂停的是「最小化」这类窗口不可见的情况。用户在场且希望立即恢复时，先征询再用 xhs_activate_window 把窗口拉回前台（会抢焦点）；若该工具回 activated=false，请用户点击任务栏中闪烁的浏览器窗口，不要反复重试。",
+            "aiGuidance": "如实转述「抓取窗口被遮挡或最小化，任务已暂停」，并说明恢复窗口可见后会自动继续。这是中间态，不是失败：不要重试、不要判失败（重试会新建任务而非恢复当前任务，且额外消耗配额）。不要再要求用户「请勿最小化」——最小化只会让任务暂停，不会失败。由本机服务冷启动的浏览器已带消遮挡开关，**被别的窗口盖住不再导致停摆**；真正会被暂停的是「最小化」这类窗口不可见的情况。用户在场且希望立即恢复时，先征询再用 xhs_activate_window 把窗口拉回前台（会抢焦点）；若该工具回 activated=false，请用户点击任务栏中闪烁的浏览器窗口，不要反复重试。暂停超过 10 分钟仍未恢复可见时，插件会把任务终态化为 `failed/TASK_INTERRUPTED`（`error.reason=stalled_timeout`）——届时按 `TASK_INTERRUPTED` 的指引处理（读 remaining，征得用户同意后原参数新开任务）。",
             "retryable": false
         },
         "QUOTA_EXCEEDED": {
@@ -104,20 +104,10 @@
             "aiGuidance": "消息中会给出可重试的绝对时刻（如「建议 14:35 后再开始」，或 24 小时内任务数已达上限）；如实转述该时刻，不要连续启动、不要换成别的工具尝试绕过。试跑只会再次被拒，并可能因新增请求量加重冷却。",
             "retryable": false
         },
-        "DATASET_QUOTA_EXCEEDED": {
-            "message": "数据集写入上限（VIP 500 篇）",
-            "aiGuidance": "说明可能只入库了部分，建议换一个新数据集。继续对同一数据集执行只会再次被拒。",
-            "retryable": false
-        },
-        "RESUME_EXHAUSTED": {
-            "message": "自动恢复次数已达上限",
-            "aiGuidance": "说明任务反复中断，建议用户人工检查浏览器环境。继续重试只会继续失败。",
-            "retryable": false
-        },
-        "RESUME_NOT_APPLICABLE": {
-            "message": "该任务当前状态不支持续接",
-            "aiGuidance": "先用 xhs_task_status 确认 source 与状态：若 source=\"manual\"（用户在插件里手动发起），如实告知「手工任务不支持续跑，请重新发起」——手工任务不进可续跑集合，不得暗示可接着跑；否则只有 blocked_by_risk / stalled_by_background / interrupted 的 Agent 任务才可续接，其余情况按该状态的指引处理。不改状态的重复续跑结果相同。",
-            "retryable": false
+        "TASK_INTERRUPTED": {
+            "message": "任务被中断，已终态失败（error.reason 说明具体原因：tab_closed/page_left/heartbeat_timeout/browser_gone/stalled_timeout）",
+            "aiGuidance": "任务不可复活、不会自动恢复。读快照 processed.articles 与 params.articleLimit 计算 remaining（快照已带 remaining 字段）：remaining=0 则告知用户本任务已抓满，不重开；remaining>0 则征得用户同意后用原参数新开任务——同 keyword 与 datasetName，articleLimit=remaining，skipExistingArticles=true（不重复入库），其余 config 沿用。同一任务因基础设施中断最多建议重试一次；被 QUOTA_EXCEEDED 拒绝时如实转述可重试时刻，不要换参硬试。",
+            "retryable": true
         },
         "RATE_LIMITED": {
             "message": "操作过于频繁（限流）",
@@ -260,15 +250,10 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试（续跑不受配额限制）。若任务因风控/验证码（blocked_by_risk）或窗口被遮挡/最小化（stalled_by_background）暂停：提示用户在浏览器中处理，用户确认已处理完毕后，用 resumeTaskId 传该任务 ID 再调一次本工具即可续跑（仅需 resumeTaskId，keyword/noteUrl/articleLimit 均无需填写，插件按剩余额度继续）。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持续跑**：resumeTaskId 指向手工任务会返回 RESUME_NOT_APPLICABLE（文案「手工任务不支持续跑，请重新发起」），失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试。【失败后的重试（v3：任务不可复活）】任务中断（TASK_INTERRUPTED）或风控（BLOCKED_BY_RISK）均为终态失败，不存在续跑：读快照 processed.articles 与 remaining（= max(0, articleLimit − 已抓篇数)），remaining=0 则告知用户已完成、不重开；remaining>0 则征得用户同意后用**原参数新开任务**——同 keyword/noteUrl 与 datasetName，articleLimit=remaining，skipExistingArticles=true（不重复入库），其余 config 沿用；同一任务因基础设施中断最多建议重试一次。旧参数 resumeTaskId 已下线，传入将返回 INVALID_ARGS。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持 AI 干预**：失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "resumeTaskId": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "续跑已暂停（blocked_by_risk / stalled_by_background）的任务 ID。填写后 keyword/noteUrl/articleLimit 均不再生效，插件从当前态继续抓取剩余额度。仅在用户确认已在浏览器中处理完风控/遮挡后使用。"
-                    },
                     "keyword": {
                         "type": "string",
                         "minLength": 1,
@@ -289,7 +274,7 @@
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 500,
-                        "description": "抓取笔记数量上限（必填，1-500；AI 联动为 VIP 专属，非 VIP 一律返回 VIP_REQUIRED，不会降级成更少篇数执行）"
+                        "description": "本任务最多抓取篇数（必填，1-500；与数据集已有数量无关，同一数据集可被多次任务累加；AI 联动为 VIP 专属，非 VIP 一律返回 VIP_REQUIRED，不会降级成更少篇数执行）"
                     },
                     "config": {
                         "type": "object",
@@ -314,7 +299,7 @@
                             },
                             "skipExistingArticles": {
                                 "type": "boolean",
-                                "description": "是否跳过数据集中已存在的笔记（默认 true，与插件配置界面一致）。跳过可避免重复抓取；续跑时插件强制为 true"
+                                "description": "是否跳过数据集中已存在的笔记（默认 true，与插件配置界面一致）。跳过可避免重复抓取；失败后新开任务补抓剩余时务必保持 true"
                             },
                             "autoExpandCommentReplies": {
                                 "type": "boolean",
@@ -338,7 +323,7 @@
         {
             "name": "xhs_task_status",
             "kind": "sync",
-            "description": "查询任务快照（状态、进度、当前篇目、错误码、resumeCount、orphaned、source 来源、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。orphaned=true 表示任意活跃态任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行恢复或转终态）：如实转述「任务暂时失联，插件会自动恢复」，不要宣告失败、不要重试、不要另起任务。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason} 自述账本新鲜度：staleReason=\"extension-offline\" 表示扩展当前离线（账本里的活跃任务可能已冻结，不要冒充实时——activeTaskFrozen 由 activeTask 非空 && extensionConnected=false 派生）；staleReason=\"broker-restarted\" 表示该任务曾被 Broker 重启占位为失败、正等插件重播核对。源为 manual 的任务（source=\"manual\"）不可由 AI 取消、不可续跑。若「账本有活跃任务但扩展离线」（矛盾信号、幽灵任务嫌疑），响应会带 repair{triggered:true, taskId, skippedReason} 表示已尝试修复式拉起浏览器——如实说明「账本里有一条在跑的任务、但扩展当前离线，属异常，正在重新连接并核对」，不要谎报仍在 running。",
+            "description": "查询任务快照（状态、进度、当前篇目、错误码与 error.reason、remaining、orphaned、source 来源、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。error.reason 是 TASK_INTERRUPTED 的结构化归因（tab_closed=抓取标签页已关闭 / page_left=页面已离开小红书 / heartbeat_timeout=心跳超时 / browser_gone=浏览器已重启 / stalled_timeout=窗口长时间不可见），按对应文案转述即可，不要添加未经证实的归因。remaining = max(0, articleLimit − 已抓篇数)，是失败后新开任务的 articleLimit 依据。orphaned=true 表示任意活跃态任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行收敛为终态）：如实转述「任务暂时失联，插件即将给出终态结论」，不要另起任务。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason} 自述账本新鲜度：staleReason=\"extension-offline\" 表示扩展当前离线（账本里的活跃任务可能已冻结，不要冒充实时——activeTaskFrozen 由 activeTask 非空 && extensionConnected=false 派生）；staleReason=\"broker-restarted\" 表示该任务曾被 Broker 重启占位为失败、正等插件重播核对。源为 manual 的任务（source=\"manual\"）不可由 AI 取消。若「账本有活跃任务但扩展离线」（矛盾信号、幽灵任务嫌疑），响应会带 repair{triggered:true, taskId, skippedReason} 表示已尝试修复式拉起浏览器——如实说明「账本里有一条在跑的任务、但扩展当前离线，属异常，正在重新连接并核对」，不要谎报仍在 running。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -378,7 +363,7 @@
         {
             "name": "xhs_wait_for_task",
             "kind": "blocking",
-            "description": "短挂起等待任务变化后返回，按 sinceSeq 只回传进度增量。单次挂起上限 30 秒（由 Broker 按 limits.waitHangSecMax 自钳，响应回 effectiveTimeoutSec），超时返回当前快照（timedOut=true）——标准用法是连续短挂起：不传 timeoutSec 用默认值，把上一次返回的 lastSeq 原样作为下次 sinceSeq。响应带 hint{nextAction: finished/wait_more/need_human, suggestedWaitSec} 与游标缺口信号（truncated、droppedCount=本轮响应省略条数、ringDroppedTotal=环形裁剪跨轮累计、firstAvailableSeq）。适合用户要求持续跟进时使用；不要为了数小时的任务反复紧密轮询。",
+            "description": "短挂起等待任务变化后返回，按 sinceSeq 只回传进度增量。单次挂起上限 30 秒（由 Broker 按 limits.waitHangSecMax 自钳，响应回 effectiveTimeoutSec），超时返回当前快照（timedOut=true）——标准用法是连续短挂起：不传 timeoutSec 用默认值，把上一次返回的 lastSeq 原样作为下次 sinceSeq。响应带 hint{nextAction: finished/wait_more/need_window_visible, suggestedWaitSec}（need_window_visible=任务因窗口不可见暂停，恢复窗口可见后自动继续）与游标缺口信号（truncated、droppedCount=本轮响应省略条数、ringDroppedTotal=环形裁剪跨轮累计、firstAvailableSeq）。适合用户要求持续跟进时使用；不要为了数小时的任务反复紧密轮询。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

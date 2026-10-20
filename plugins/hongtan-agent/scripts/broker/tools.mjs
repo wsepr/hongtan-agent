@@ -15,7 +15,7 @@
 
 import crypto from "node:crypto";
 import { validateAgainstSchema } from "./schema.mjs";
-import { BROKER_TERMINAL_STATES, BROKER_INTERMEDIATE_STATES, WAIT_EARLY_RETURN_STATES } from "./task-store.mjs";
+import { BROKER_TERMINAL_STATES, WAIT_EARLY_RETURN_STATES } from "./task-store.mjs";
 import { BROWSER_UNRESOLVABLE } from "./browser/resolve-exe.mjs";
 import { contractsFingerprint, resolveBuildId } from "../build-fingerprint.mjs";
 import { AGENT_VERSION } from "../version.mjs";
@@ -446,9 +446,13 @@ export function createToolExecutor({
     }
 
     async function toolStartCrawl(args) {
-        // 显式续接（§8.3）：resumeTaskId 优先于一切参数——它不是新任务，只是把暂停中的任务推回运行
-        const resumeTaskId = typeof args?.resumeTaskId === "string" && args.resumeTaskId.trim() !== "" ? args.resumeTaskId.trim() : null;
-        if (resumeTaskId) return toolResumeTask(resumeTaskId);
+        // v3 续跑已下线：显式拒绝旧形态，避免 AI 静默忽略后误判「任务还在继续」
+        if (typeof args?.resumeTaskId === "string" && args.resumeTaskId.trim() !== "") {
+            return err(
+                "INVALID_ARGS",
+                "续跑已下线，请用原参数新开任务：同 keyword 与 datasetName，articleLimit=剩余篇数（snapshot.remaining），skipExistingArticles=true，其余 config 沿用"
+            );
+        }
 
         // 1. 契约校验（articleLimit 必填等；keyword/noteUrl 二选一为 schema 之外的互斥语义）
         const schemaError = validate("xhs_start_crawl", args);
@@ -462,10 +466,14 @@ export function createToolExecutor({
             return err("URL_NOT_MATCHED", "noteUrl 仅支持 xiaohongshu.com 域内 URL");
         }
 
-        // 2. 单飞互斥
+        // 2. 单飞互斥（按对方状态给出可转述的处置指引）
         const active = taskStore.activeTask();
         if (active) {
-            return err("TASK_BUSY", `已有任务在跑（taskId=${active.id}, state=${active.state}），请先用 xhs_task_status 查看`);
+            const busyHint =
+                active.state === "stalled_by_background"
+                    ? "有一个窗口被遮挡的暂停任务，请恢复窗口可见（或用 xhs_cancel_task 取消后重发）"
+                    : "已有任务在进行，请先用 xhs_task_status 查看";
+            return err("TASK_BUSY", `任务占用中（taskId=${active.id}, state=${active.state}）：${busyHint}`);
         }
 
         // 3. 配额预检（§10.5）：读插件上报的配额快照做派发前拦截——未到可启动时刻直接拒绝、
@@ -552,41 +560,6 @@ export function createToolExecutor({
         });
     }
 
-    /**
-     * 显式续接（设计文档 §8.3 / §10.4）：AI 经用户确认后让 `blocked_by_risk` /
-     * `stalled_by_background` 的任务继续。
-     *
-     * 不占任务配额——续接不是「新启动」，只是把已存在的暂停任务推回 running；
-     * 真正的风控暴露面控制由「用户已人工处理完」这一前提提供。
-     */
-    function toolResumeTask(taskId) {
-        const task = taskStore.get(taskId);
-        if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${taskId}`);
-        // 手工任务不进可续跑集合（详细设计 §7.4）：失败即用户重跑，AI 不得据此暗示「可接着跑」
-        if ((task.source ?? "agent") === "manual") {
-            return err("RESUME_NOT_APPLICABLE", "手工任务不支持续跑，请重新发起");
-        }
-        if (!BROKER_INTERMEDIATE_STATES.has(task.state)) {
-            return err(
-                "RESUME_NOT_APPLICABLE",
-                `任务当前状态 ${task.state} 不支持续接（仅 blocked_by_risk / stalled_by_background / interrupted 可续接）`
-            );
-        }
-        if (!session.isConnected()) {
-            return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
-        }
-        if (!session.sendTaskStart(task, { resume: true })) {
-            return err("EXTENSION_OFFLINE", "扩展连接在续接瞬间断开，请稍后重试");
-        }
-        taskStore.setState(task, "running");
-        audit?.append("task_resumed", { taskId: task.id });
-        return ok({
-            taskId: task.id,
-            state: task.state,
-            message: "续跑指令已下发。请用 xhs_task_status 轮询跟进（间隔不少于 10 秒）",
-        });
-    }
-
     function toolTaskStatus(args) {
         const task = taskStore.get(args?.taskId);
         if (!task) return err("TASK_NOT_FOUND", `任务不存在: ${args?.taskId}`);
@@ -614,7 +587,7 @@ export function createToolExecutor({
     }
 
     /**
-     * wait 的早退等待：终态或任一中间态（含 interrupted）立即返回。
+     * wait 的早退等待：终态或唯一中间态（stalled_by_background）立即返回。
      * 主路径是 taskStore 变更事件（25ms 去抖合并），sleep（可注入）仅作 2s 兜底与 deadline 推进——
      * 因此正常路径无忙轮询，且测试可推时钟。
      */
@@ -650,10 +623,11 @@ export function createToolExecutor({
         if (BROKER_TERMINAL_STATES.has(task.state)) {
             return { nextAction: "finished", suggestedWaitSec: 0 };
         }
-        if (task.state === "blocked_by_risk") {
-            return { nextAction: "need_human", suggestedWaitSec: 0 };
+        if (task.state === "stalled_by_background") {
+            // 唯一中间态：窗口被遮挡/最小化，恢复可见即自愈，不需要人工盯守
+            return { nextAction: "need_window_visible", suggestedWaitSec: 0 };
         }
-        // 其余早退均为中间态：插件多在自愈，短挂起续读即可
+        // 派发在途（queued/launching_browser/waiting_extension/running）：插件多在推进，短挂起续读即可
         return { nextAction: "wait_more", suggestedWaitSec: 15 };
     }
 
@@ -708,9 +682,9 @@ export function createToolExecutor({
         if (!taskStore.setState(task, "canceling")) {
             return err("CANCEL_REJECTED", `当前状态 ${task.state} 不允许取消`);
         }
-        // 取消派发对象：running 及全部中间态（含 interrupted）都可能在插件侧持有抓取循环；
+        // 取消派发对象：running 与唯一中间态 stalled 都可能在插件侧持有抓取循环；
         // 与 WAIT_EARLY_RETURN_STATES 不同构（含 running、不含终态），保持独立字面量
-        if (session.isConnected() && ["running", "blocked_by_risk", "stalled_by_background", "interrupted"].includes(previousState)) {
+        if (session.isConnected() && ["running", "stalled_by_background"].includes(previousState)) {
             session.sendTaskCancel(task.id);
         }
         const deadline = now() + options.cancelTimeoutMs;
@@ -743,8 +717,8 @@ export function createToolExecutor({
                 return err(verdict.reason, verdict.message);
             }
         }
-        // xhs_start_crawl 自带参数校验（resumeTaskId 形态不要求 articleLimit，keyword/noteUrl 互斥亦为
-        // schema 之外的语义），因此先于通用校验分派，避免续接形态被 articleLimit 必填挡下
+        // xhs_start_crawl 自带参数校验（keyword/noteUrl 互斥与 resumeTaskId 显式拒绝为 schema
+        // 之外的语义），先于通用校验分派
         if (tool === "xhs_start_crawl") return toolStartCrawl(args);
         const schemaError = validate(tool, args);
         if (schemaError === "UNKNOWN_TOOL") return err("UNKNOWN_TOOL", `未知工具: ${tool}`);

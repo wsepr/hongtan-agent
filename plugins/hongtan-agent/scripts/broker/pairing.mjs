@@ -10,7 +10,8 @@
 import crypto from "node:crypto";
 import { buildProofPayload, deviceIdFromRawKey } from "../device-identity.mjs";
 
-export const PROTOCOL_VERSION = 1;
+/** 协议版本（v3：续跑下线 / 中断终态化 / 单任务上限口径，双端严格等值） */
+export const PROTOCOL_VERSION = 2;
 export const CHALLENGE_TTL_MS = 30_000;
 
 export function createPairing({ identity, now = () => Date.now(), challengeTtlMs = CHALLENGE_TTL_MS, logger = console } = {}) {

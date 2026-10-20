@@ -5,8 +5,7 @@
  * 这里实现其中四类（第五类「Broker 掉线」只有 adapter 侧能观察到，见 mcp-server 的 /health 探测告警）：
  * 1. `extension_offline`：扩展连续离线超过阈值（默认 10 分钟）；
  * 2. `task_heartbeat_stall`：在跑任务超过阈值没有进度更新（Broker 视角的心跳超时）；
- * 3. `resume_exhausted`：任务恢复次数达上限（`RESUME_EXHAUSTED` 终态）；
- * 4. `connection_storm`：`kicked_old` 在窗口内高频出现（M2 开发期实测 40s 内 41 次，正式版须告警）。
+ * 3. `connection_storm`：`kicked_old` 在窗口内高频出现（M2 开发期实测 40s 内 41 次，正式版须告警）。
  *
  * 告警落审计（`event: "alert"` + `kind`），并同时写日志；**去重**：同一任务的 stall、
  * 同一段离线只告警一次，避免刷屏（风暴类告警后重新计数）。
@@ -78,10 +77,6 @@ export function createAlertMonitor({ now = () => Date.now(), audit, logger = con
         /** 任务进入终态（从 stall 告警集合里摘除，避免同一 taskId 复用场景误报） */
         noteTaskSettled(taskId) {
             alertedStalled.delete(taskId);
-        },
-        /** 任务恢复次数耗尽 */
-        noteResumeExhausted(taskId) {
-            emit("resume_exhausted", { taskId });
         },
         /**
          * watchdog 周期调用（Broker 的 1 分钟 tick）。

@@ -77,19 +77,18 @@ curl http://127.0.0.1:17373/health
 | `broker_start` / `hello_ok` / `ws_close` / `extension_disconnected` | 生命周期 |
 | `kicked_old` | 单扩展连接策略触发（连接风暴告警项） |
 | `session_proof_error` / `hello_reject` | 认证失败与版本拒绝 |
-| `task_created` / `task_dispatched` / `task_result` / `task_intermediate` / `task_resumed_running` / `task_recovered` / `task_readopted` / `task_cancel_*` | 任务全生命周期（`task_intermediate` 落中间态、`task_resumed_running` 表示插件报回 running 后账本同步回在跑、`task_readopted` 表示 Broker 重启的 `failed(BROKER_RESTARTED)` 占位被插件重播推翻） |
+| `task_created` / `task_dispatched` / `task_result` / `task_intermediate` / `task_resumed_running` / `task_readopted` / `task_cancel_*` | 任务全生命周期（`task_intermediate` 落中间态、`task_resumed_running` 表示插件报回 running 后账本同步回在跑、`task_readopted` 表示 Broker 重启的 `failed(BROKER_RESTARTED)` 占位被插件重播推翻） |
 | `browser_recorded` / `browser_resolved` / `browser_resolve_pending` / `browser_profile_resolved` / `browser_launch` / `browser_launch_skipped` / `browser_launch_escalated` / `browser_launch_escalation_skipped` / `browser_spawn_error` / `browser_launch_error` | 浏览器拉起留痕（§10.7 安全边界；`browser_launch_skipped` = 吻痕/进程探测命中跳过（`reason: recent-contact \| process-running`），`browser_launch_escalated` = skip 30s 后强制拉起一次（每任务封顶），`browser_launch_escalation_skipped` = 到期已回连（`reason: contact-refreshed`）或无等待任务（`no-pending-task`）而不升级，见《常驻工作区设计方案》§5.2） |
 | `adapter_registered` / `adapter_register_rejected` | Adapter 设备签名握手 |
 | `tool_call` | 工具调用（不含敏感参数） |
 | `snapshot_session_written` / `snapshot_datasets_refreshed` | 只读快照落盘（`session-snapshot.json`）：hello 写会话摘要、数据集列表刷新（hello 后主动拉 / sync 写穿 / 任务终态）。**只记条数与时间，不记数据集内容** |
 | `quota_rejected` / `rate_limited` | 配额**预检**拒绝（Broker 按插件上报的快照拦截，带 `readyAt`/`reason`；判定与结算在插件侧，§10.5）/ action 级限流 |
 | `alert` | **告警事件**（`kind` 见下；已实现，落审计便于事后复盘） |
-| `task_resumed` | 用户确认后的显式续接（`xhs_start_crawl { resumeTaskId }`） |
 | `env_prepare` | 「环境就绪」工具 `xhs_prepare_env` 被调用（纯唤醒：不建任务、不占单飞、不耗配额）；带 `reason` 与拉起结果 |
 | `task_query_launch` | 任务查询（`xhs_task_status` / `xhs_task_list`）命中「账本有活跃任务 + 扩展离线」时的**修复式拉起**（reason=`task-query`）；`launched` 字段区分"真正发起"与"被防抖/进程探测跳过"（后者带 `skippedReason`） |
 | `task_cancel_forced` | 插件明确「本机没有该任务」（`NO_ACTIVE_TASK` / `TASK_ID_MISMATCH`）→ 账本强制收敛为 `canceled`（脏状态清理） |
 
-`task_result` 现在带 `errorCode` / `resumeCount` / `durationMs` / `datasetId` / `hostKey` / `deviceId` / `summary`（§11.1 可归因）；`task_created` 带 `tool`。
+`task_result` 现在带 `errorCode` / `errorReason` / `durationMs` / `datasetId` / `hostKey` / `deviceId` / `summary`（§11.1 可归因）；`task_created` 带 `tool`。
 
 **告警（§11.6，`event: "alert"` + `kind`）**：
 
@@ -97,7 +96,6 @@ curl http://127.0.0.1:17373/health
 |---|---|---|
 | `extension_offline` | 扩展连续离线 ≥10 分钟 | 检查浏览器是否仍在运行、插件开关是否被关；必要时重开浏览器 |
 | `task_heartbeat_stall` | 在跑任务 ≥5 分钟无进度更新 | 多为遮挡/挂起；看 `/health` 的 `activeTaskId` 与插件侧抓取窗口状态 |
-| `resume_exhausted` | 任务终态错误码为 `RESUME_EXHAUSTED` | 人工检查浏览器环境（反复中断已达 3 次上限） |
 | `connection_storm` | 60 秒内 `kicked_old` ≥5 次 | 典型原因是多 profile 同时连同一 Broker → 按 `SECURITY.md §6.1` 拆分独立状态目录与端口 |
 | （Broker 掉线） | 由 **adapter** 侧观察：**每次工具调用**都会先探测 `/health`（命中健康缓存 5s 内不重复探测），未运行则 spawn detached 拉起并在宿主 stderr 告警「Broker 未运行 / Broker 已就绪 / Broker 拉起失败（15s 内 /health 不可达）」；**拉起失败或掉线都不被缓存**，下一次调用会重新探测 + 重试 | 查看该进程输出；Broker 自身无法为自己死亡告警 |
 
@@ -119,12 +117,11 @@ curl http://127.0.0.1:17373/health
 | 工具返回 `BROWSER_OFFLINE` | 本机服务正在拉起浏览器；若持续不回，确认浏览器可执行文件路径未漂移（查看 `browser.config`） |
 | 工具返回 `EXTENSION_OFFLINE` | 浏览器在跑但扩展未连。检查插件「Agent 接管」开关是否开启；SW 由 `alarms`（0.5 分钟）自愈重连，等一轮再查 |
 | 工具返回 `EXTENSION_UNAVAILABLE` | 拉起浏览器 90s 后仍无连接。检查扩展是否安装/启用、设备是否已批准 |
-| 任务反复中断 | 看审计里 `task_recovered` 频次；自动恢复上限为 **3 次**，达上限转 `failed(RESUME_EXHAUSTED)`，需人工检查浏览器环境 |
-| 任务停在 `blocked_by_risk` | 风控/验证码/未登录，**不自动重试**。用户在浏览器处理完并确认后，带 `resumeTaskId` 再调一次 `xhs_start_crawl` 即可续跑（审计记 `task_resumed`） |
-| 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。恢复窗口可见即自动继续；v2.12 起不再自动还原/抢焦点。用户在场时先征询再调 `xhs_activate_window` 拉回前台；也可经确认后用 `resumeTaskId` 续跑 |
-| 终态是 `partial` 且带 `DATASET_QUOTA_EXCEEDED` | 运行中数据集写入被 SW 防线拒绝（已达 500 篇上限）。结果如实汇报为部分完成；换一个数据集重跑 |
+| 任务反复中断 | 每次中断都是终态 `failed(TASK_INTERRUPTED)`（`error.reason` 归因），**不会自动恢复**；提示用户重新发起任务，并排查浏览器/页面环境（同一任务最多建议重试一次） |
+| 任务终态为 `failed/BLOCKED_BY_RISK` | 风控/验证码，任务不可复活、**不自动重试**。用户在浏览器处理完后，用原参数（同 keyword 与 datasetName、`articleLimit=remaining`、`skipExistingArticles=true`）新开任务 |
+| 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。恢复窗口可见即自动继续；v2.12 起不再自动还原/抢焦点。用户在场时先征询再调 `xhs_activate_window` 拉回前台；超过 10 分钟未恢复会终态化为 `failed/TASK_INTERRUPTED(stalled_timeout)`，届时按失败后重试流程处理 |
 | 工具返回 `RATE_LIMITED` | action 级限流触发（默认 60 次/分钟/工具）。等提示的秒数后重试；轮询间隔应 ≥10 秒 |
 | 工具返回 `BROKER_UNREACHABLE` / `BROKER_ERROR` | Broker 进程被杀或崩溃。adapter 会**自动重新拉起并重发该次调用**（连接类失败才重发，超时类不重发以免工具被执行两次）；若反复出现，按宿主 stderr 告警指引手动启动 `node scripts/broker-server.mjs` 并查看其输出 |
-| 扩展重载后旧页面无响应 | 扩展重载会使已存在页面的 content script 成为孤儿上下文。该场景由心跳超时/恢复流程覆盖（优先复用原 tab，不可用则重开抓取窗口并重下发） |
+| 扩展重载后旧页面无响应 | 扩展重载会使已存在页面的 content script 成为孤儿上下文。该场景由心跳超时收敛覆盖：任务终态为 `failed/TASK_INTERRUPTED`，继续抓取需用原参数新开任务 |
 | 多 profile 下连接反复断开 | 单 Broker 只接受一个扩展连接（新连接踢旧）。见 SECURITY.md §6.1：为每份 profile 使用独立的 `HONGTAN_AGENT_STATE_DIR` 与端口 |
-| 开机后任务没续跑 | 检查开机自启是否注册成功；整机重启续跑属验收项（见执行计划 S14） |
+| 开机后任务没继续 | 任务不跨重启存活：重启后插件按心跳超时把在途任务终态化（`failed/TASK_INTERRUPTED(browser_gone|heartbeat_timeout)`），需重新发起任务。检查开机自启是否注册成功（见执行计划 S14） |

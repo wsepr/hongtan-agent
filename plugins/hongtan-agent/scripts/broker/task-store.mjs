@@ -1,9 +1,11 @@
 /**
  * 任务账本（设计文档 §8 / 执行计划 S1）——状态机 + 24h JSON 落盘。
  *
- * - 状态机：queued → launching_browser → waiting_extension → running → 终态，
- *   含 blocked_by_risk / stalled_by_background（中间态透传）、interrupted、canceling；
+ * - 状态机（v3）：queued → launching_browser → waiting_extension → running → 终态，
+ *   唯一中间态 stalled_by_background（遮挡/最小化暂停，恢复可见自愈）；
+ *   interrupted / blocked_by_risk / partial 已删除：中断与风控一律终态失败，任务不可复活；
  * - 账本：JSON 文件落盘（原子写），24h TTL watchdog 清理；seq 单调递增；
+ * - 旧状态只读归一化（D9）：load 时把旧落盘记录映射为新语义，不迁移原文；
  * - 依赖注入（fs/now/logger），可单测。
  */
 
@@ -12,7 +14,6 @@ import path from "node:path";
 
 export const BROKER_TERMINAL_STATES = new Set([
     "completed",
-    "partial",
     "failed",
     "canceled",
     "aborted_by_user",
@@ -23,20 +24,56 @@ export const BROKER_ACTIVE_STATES = new Set([
     "launching_browser",
     "waiting_extension",
     "running",
-    "blocked_by_risk",
     "stalled_by_background",
-    "interrupted",
     "canceling",
 ]);
 
 /** 中间态（暂停态，非终态）：经 task.progress 与插件双向同步（§8.3 / §10.4 / §10.7） */
-export const BROKER_INTERMEDIATE_STATES = new Set(["blocked_by_risk", "stalled_by_background", "interrupted"]);
+export const BROKER_INTERMEDIATE_STATES = new Set(["stalled_by_background"]);
 
 /**
  * wait_for_task 的早退集合（问题清单 1.3）：终态或任一中间态都应立即返回，
- * 不含 interrupted 会让 wait 在遮挡/心跳中断期间挂满整个 timeoutSec，撞上宿主 ≈60s 放弃线。
+ * 不含 stalled 会让 wait 在遮挡期间挂满整个 timeoutSec，撞上宿主 ≈60s 放弃线。
  */
 export const WAIT_EARLY_RETURN_STATES = new Set([...BROKER_TERMINAL_STATES, ...BROKER_INTERMEDIATE_STATES]);
+
+/** 旧状态集合（D9）：v3 删除的历史状态，load 时只读归一化 */
+const LEGACY_TASK_STATES = new Set(["interrupted", "blocked_by_risk", "partial"]);
+
+/**
+ * 旧状态归一化（D9，只读）：与插件侧 legacyStatus.ts 同口径。
+ * - partial → failed/TASK_INTERRUPTED（历史说明：旧版本按数据集写入上限提前结束）；
+ * - interrupted：达标 → completed；未达标 → failed/TASK_INTERRUPTED（不猜原因）；
+ * - blocked_by_risk → failed/BLOCKED_BY_RISK（保留风控加成语义）。
+ * 返回归一化副本；非旧状态原样返回（保持引用）。
+ */
+export function normalizeLegacyTask(task) {
+    if (!task || !LEGACY_TASK_STATES.has(task?.state)) return task;
+    const normalized = { ...task };
+    const originalTarget = Number.isFinite(task.params?.articleLimit) ? task.params.articleLimit : 0;
+    const articles = Number.isFinite(task.processed?.articles) ? task.processed.articles : 0;
+    if (task.state === "partial") {
+        normalized.state = "failed";
+        normalized.error = {
+            code: "TASK_INTERRUPTED",
+            message: "历史记录：旧版本按数据集写入上限提前结束（该上限已移除）",
+        };
+    } else if (task.state === "interrupted") {
+        if (originalTarget > 0 && articles >= originalTarget) {
+            normalized.state = "completed";
+        } else {
+            normalized.state = "failed";
+            normalized.error = {
+                code: "TASK_INTERRUPTED",
+                message: "历史记录：任务在旧版本中断（当时未记录中断原因）",
+            };
+        }
+    } else if (task.state === "blocked_by_risk") {
+        normalized.state = "failed";
+        normalized.error = { code: "BLOCKED_BY_RISK", message: "历史记录：任务在旧版本因风控阻断" };
+    }
+    return normalized;
+}
 
 /**
  * 孤儿判定窗口（§8.1：60s 无心跳 ⇒ orphaned）。
@@ -54,28 +91,21 @@ export const BROKER_TRANSITIONS = {
     waiting_extension: ["running", "failed", "canceled"],
     running: [
         "completed",
-        "partial",
         "failed",
         "canceled",
-        "blocked_by_risk",
         "stalled_by_background",
-        "interrupted",
         "canceling",
         "aborted_by_user",
     ],
     /**
      * 中间态是**暂停**而非终态（§8.3）：插件才是终态权威，暂停之后既可能回 running
-     * （用户过完验证码 / 遮挡解除），也可能直接收尾（暂停期间达标、或用户取消）。
-     * 因此中间态必须允许所有终态目标——原先只允许 running/canceled/aborted_by_user，
-     * 会让「暂停后正常完成」的 task.result 被拒，账本永远停在中间态（/health 与
-     * xhs_task_list 显示任务永不结束，终态 summary/error 也写不进去）。
+     * （遮挡解除），也可能直接收尾（暂停期间达标、或用户取消）。
+     * 因此中间态必须允许所有终态目标——否则「暂停后正常完成」的 task.result 会被拒，
+     * 账本永远停在中间态（终态 summary/error 也写不进去）。
      */
-    blocked_by_risk: ["running", "completed", "partial", "failed", "canceled", "aborted_by_user"],
-    stalled_by_background: ["running", "completed", "partial", "failed", "canceled", "aborted_by_user"],
-    interrupted: ["running", "completed", "partial", "failed", "canceled", "aborted_by_user"],
+    stalled_by_background: ["running", "completed", "failed", "canceled", "aborted_by_user"],
     canceling: ["canceled", "running", "failed"],
     completed: [],
-    partial: [],
     failed: [],
     canceled: [],
     aborted_by_user: [],
@@ -140,9 +170,10 @@ export function createTaskStore({
             const raw = fsImpl.readFileSync(ledgerPath, "utf8");
             const list = JSON.parse(raw);
             if (Array.isArray(list)) {
-                for (const task of list) {
-                    // 非终态任务在 Broker 重启后无法自动续派（插件侧自会恢复/收敛），
-                    // 直接标记失败，等待 TTL 清理
+                for (const rawTask of list) {
+                    // D9：旧状态（interrupted/blocked_by_risk/partial）先只读归一化为新语义，
+                    // 再走「非终态 → failed(BROKER_RESTARTED)」的常规收敛
+                    const task = normalizeLegacyTask(rawTask);
                     if (!BROKER_TERMINAL_STATES.has(task.state)) {
                         task.state = "failed";
                         task.error = { code: "BROKER_RESTARTED", message: "Broker 重启，任务状态不可续持" };
@@ -210,7 +241,7 @@ export function createTaskStore({
                 id,
                 kind,
                 params,
-                // 任务来源（详细设计 §2.3）：manual = 用户在插件里手动发起的抓取（不可由 AI 取消/续跑）
+                // 任务来源（详细设计 §2.3）：manual = 用户在插件里手动发起的抓取（不可由 AI 取消）
                 source,
                 state: "queued",
                 seq: 0,
@@ -218,7 +249,6 @@ export function createTaskStore({
                 visibility: null,
                 blocked: null,
                 effectiveConfig: null,
-                resumeCount: 0,
                 extensionTabId: null,
                 extensionWindowId: null,
                 error: null,
@@ -244,11 +274,6 @@ export function createTaskStore({
                 if (BROKER_ACTIVE_STATES.has(task.state)) return task;
             }
             return null;
-        },
-
-        /** 可续跑判定（详细设计 §2.3）：仅中间态的 Agent 任务可续；手工任务不支持续跑 */
-        isResumable(task) {
-            return !!task && BROKER_INTERMEDIATE_STATES.has(task.state) && (task.source ?? "agent") === "agent";
         },
 
         list({ limit = 20, datasetId } = {}) {
@@ -292,13 +317,13 @@ export function createTaskStore({
          * 占位；设计明确此时**以插件为准**收敛。但 `task.progress` 对终态任务是 no-op，
          * 于是若不推翻该占位，账本会长期停在 failed，而插件其实还在跑（AI 会误报失败）。
          * 故：仅当失败原因正是 `BROKER_RESTARTED` 时允许按插件上报的状态复活，
-         * 其余终态（真实结果）仍不可逆。
+         * 其余终态（真实结果）仍不可逆。v3 只接受 running / stalled_by_background。
          */
         readoptFromPlugin(taskId, state) {
             const task = tasks.get(taskId);
             if (!task) return false;
             if (!BROKER_TERMINAL_STATES.has(task.state) || task.error?.code !== "BROKER_RESTARTED") return false;
-            if (!["running", "interrupted", "blocked_by_risk", "stalled_by_background"].includes(state)) return false;
+            if (!["running", "stalled_by_background"].includes(state)) return false;
             task.state = state;
             task.stateChangedAt = now();
             task.error = null;
@@ -342,21 +367,8 @@ export function createTaskStore({
         noteIntermediateState(taskId, intermediate) {
             const task = tasks.get(taskId);
             if (!task || BROKER_TERMINAL_STATES.has(task.state)) return false;
-            if (!["blocked_by_risk", "stalled_by_background", "interrupted"].includes(intermediate)) return false;
+            if (!["stalled_by_background"].includes(intermediate)) return false;
             return setState(task, intermediate);
-        },
-
-        noteRecovered(taskId, { tabId, windowId, resumeCount, remaining }) {
-            const task = tasks.get(taskId);
-            if (!task) return false;
-            task.extensionTabId = tabId ?? task.extensionTabId;
-            task.extensionWindowId = windowId ?? task.extensionWindowId;
-            if (Number.isFinite(resumeCount)) task.resumeCount = resumeCount;
-            if (Number.isFinite(remaining)) task.remainingTarget = remaining;
-            task.updatedAt = now();
-            persist();
-            emitChange(taskId);
-            return true;
         },
 
         snapshot(task) {
@@ -375,7 +387,15 @@ export function createTaskStore({
                 lastMessage: task.lastMessage ?? null,
                 blocked: task.blocked,
                 effectiveConfig: task.effectiveConfig,
-                resumeCount: task.resumeCount,
+                /**
+                 * 本任务剩余目标（仅展示，不落盘）：articleLimit − 已抓篇数。
+                 * 供 AI 在 failed(TASK_INTERRUPTED/BLOCKED_BY_RISK) 后计算新开任务的 articleLimit。
+                 */
+                remaining: Math.max(
+                    0,
+                    (Number.isFinite(task.params?.articleLimit) ? task.params.articleLimit : 0) -
+                        (Number.isFinite(task.processed?.articles) ? task.processed.articles : 0)
+                ),
                 extensionTabId: task.extensionTabId,
                 /**
                  * 孤儿信号（§8.1 / §6.3 / 详细设计 §2.2）：**全部活跃态**超过 60s 没有新消息 ⇒ 视为已失联，
