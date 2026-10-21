@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 2,
-    "toolsVersion": 11,
+    "toolsVersion": 12,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -46,7 +46,7 @@
         },
         "VIP_REQUIRED": {
             "message": "AI 联动为 VIP 专属能力（非 VIP 或会员态无法确认）",
-            "aiGuidance": "如实说明「AI 联动为 VIP 功能」，引导用户开通会员或登录红探账号；不要重试。重复执行只会再次被拒。",
+            "aiGuidance": "如实说明「AI 联动为 VIP 功能」，引导用户开通会员或登录红探账号；不要重试。除 xhs_connection_status、xhs_prepare_env 外，其余工具均需 VIP。刚开通会员可先调 xhs_connection_status 刷新会员态后重试；浏览器未连接可先调 xhs_prepare_env 唤醒（它不受 VIP 门禁限制）。重复执行只会再次被拒。",
             "retryable": false
         },
         "NOT_LOGGED_IN": {
@@ -119,6 +119,11 @@
             "aiGuidance": "核对 taskId 是否来自 xhs_start_crawl 的返回；任务可能已超过 24 小时被清理。重复调用结果相同。",
             "retryable": false
         },
+        "DATASET_NOT_FOUND": {
+            "message": "数据集不存在",
+            "aiGuidance": "先用 xhs_list_datasets 核对数据集名称或 ID，不要原样重试；重名/改名后按名字无法定位时改用 datasetId。",
+            "retryable": false
+        },
         "INVALID_ARGS": {
             "message": "参数校验失败",
             "aiGuidance": "按工具 inputSchema 修正参数后重试（注意 articleLimit 必填）。不改参数的重试结果相同。",
@@ -131,7 +136,7 @@
         },
         "BROKER_NO_RESPONSE": {
             "message": "请求已送达 Broker 但未在时限内收到响应，执行结果未知",
-            "aiGuidance": "先调 xhs_task_status 确认是否已生效，禁止直接重发等待/启动类调用（xhs_wait_for_task / xhs_start_crawl / xhs_cancel_task）。重发有副作用的工具可能造成重复执行或把会话再挂满一轮。",
+            "aiGuidance": "先调 xhs_task_status 确认是否已生效，禁止直接重发等待/启动/取消类调用（xhs_wait_for_task / xhs_start_crawl / xhs_cancel_task）。读类调用（xhs_dataset_overview / xhs_list_articles / xhs_read_articles）若确需继续，可用更小范围（更少 articleIds、更小 pageSize/commentLimit）重试一次。重发有副作用的工具可能造成重复执行或把会话再挂满一轮。",
             "retryable": false
         },
         "RUNTIME_STALE": {
@@ -244,6 +249,183 @@
                 },
                 "required": [
                     "newName"
+                ]
+            }
+        },
+        {
+            "name": "xhs_dataset_overview",
+            "kind": "sync",
+            "description": "数据集概览（分析第一步）：返回数据集基本信息（id、name、articleCount、scrapedCommentCount）、笔记发布时间范围（timeRange）、互动汇总（interactions.totalLikes/avgLikes/totalCollects/totalComments，avgLikes 为总赞/笔记数并保留 1 位小数）、按点赞与按评论数排序的 Top5 笔记摘要（hotArticles.byLikes/byComments，摘要字段 id/title/likeCount/commentCount/scrapedCommentCount，其中 id 供 xhs_read_articles 使用）、标签分布（tagDistribution）与抓取状态（activeCrawl/activeCrawlSource/crawlingHint）。纯笔记层聚合，不加载正文与评论，适合先建立全局认识再决定读哪几篇。datasetId 与 datasetName 必须二选一（同时传或都不传 → INVALID_ARGS）；数据集不存在 → DATASET_NOT_FOUND。AI 联动为 VIP 专属；读取恒为实时查询（无离线快照），扩展离线时先调 xhs_prepare_env 唤醒。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "datasetId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "数据集 ID（与 datasetName 二选一）"
+                    },
+                    "datasetName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "数据集名称（与 datasetId 二选一）"
+                    }
+                },
+                "oneOf": [
+                    {
+                        "required": [
+                            "datasetId"
+                        ]
+                    },
+                    {
+                        "required": [
+                            "datasetName"
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "name": "xhs_list_articles",
+            "kind": "sync",
+            "description": "浏览数据集中的笔记列表并按条件筛选分析目标（S2）。datasetId 与 datasetName 必须二选一。page 默认 1；pageSize 默认 30、最大 1000；pageSize>100 时自动精简行字段为 id/title/publishTime/likes/comments/scrapedComments/scrapedAt，响应 compact=true，并忽略 includeTags（回 tagsOmitted=true）——大页只用于枚举统计，需要标签时用 pageSize<=100。sort 默认 scrapedTime（最近一次入库/重抓时间倒序，此时行内附 scrapedAt）；publishTime/likeCount/commentCount/collectCount 按对应字段倒序。scrapedAfter/scrapedBefore 按抓取时间（YYYY-MM-DD，article.createdAt）过滤。tagNames 最多 5 个、OR 语义（命中任一即保留），未匹配的名称在 tagNamesNotFound 回传；includeTags 默认 false（有 tagNames 时自动为 true）。响应含 page/pageSize/total/totalPages/hasMore 与 activeCrawl/activeCrawlSource/crawlingHint。comments=笔记页显示的评论总数，scrapedComments=实际抓取总数（含回复）。刻意不返回正文、链接、作者 ID。AI 联动为 VIP 专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "datasetId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "数据集 ID（与 datasetName 二选一）"
+                    },
+                    "datasetName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "数据集名称（与 datasetId 二选一）"
+                    },
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "页码（默认 1）"
+                    },
+                    "pageSize": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "description": "每页条数（默认 30；>100 自动精简行字段）"
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": [
+                            "scrapedTime",
+                            "publishTime",
+                            "likeCount",
+                            "commentCount",
+                            "collectCount"
+                        ],
+                        "description": "排序键，默认 scrapedTime（最近一次入库/重抓时间倒序）"
+                    },
+                    "scrapedAfter": {
+                        "type": "string",
+                        "description": "抓取时间下界（YYYY-MM-DD，按 article.createdAt 过滤）"
+                    },
+                    "scrapedBefore": {
+                        "type": "string",
+                        "description": "抓取时间上界（YYYY-MM-DD，按 article.createdAt 过滤）"
+                    },
+                    "tagNames": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "maxItems": 5,
+                        "description": "按标签筛选（OR 语义：命中任一即保留；不存在的名称忽略并在 tagNamesNotFound 回传）"
+                    },
+                    "includeTags": {
+                        "type": "boolean",
+                        "description": "行内附带标签名（默认 false；tagNames 筛选时自动置 true，compact 档忽略）"
+                    }
+                },
+                "oneOf": [
+                    {
+                        "required": [
+                            "datasetId"
+                        ]
+                    },
+                    {
+                        "required": [
+                            "datasetName"
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "name": "xhs_read_articles",
+            "kind": "sync",
+            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部（默认，可能超过 1000）、0=不要评论、1-1000=清洗后按 commentSort 取前 N 条顶层；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,body}（body 为渲染后的 markdown，按请求 articleIds 顺序）、missingArticleIds、truncated/truncatedArticleIds。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论边界截断，truncated=true 时应用更小范围重读。AI 联动为 VIP 专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "datasetId": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "数据集 ID（与 datasetName 二选一）"
+                    },
+                    "datasetName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 50,
+                        "description": "数据集名称（与 datasetId 二选一）"
+                    },
+                    "articleIds": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "description": "笔记 ID 列表（来自 list/overview 返回的 id），每次 1-5 篇"
+                    },
+                    "commentLimit": {
+                        "type": "integer",
+                        "minimum": -1,
+                        "maximum": 1000,
+                        "description": "-1=全部顶层评论；0=不要评论；1-1000=清洗后最多返回的顶层评论数；默认 -1"
+                    },
+                    "commentSort": {
+                        "type": "string",
+                        "enum": [
+                            "likes",
+                            "time"
+                        ],
+                        "description": "顶层评论排序：likes=按点赞倒序，time=按时间正序；默认 likes"
+                    },
+                    "includeReplies": {
+                        "type": "boolean",
+                        "description": "是否包含回复楼（默认 true）"
+                    },
+                    "replyLimit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "每条顶层评论最多带回复数；0=不限，默认 0"
+                    }
+                },
+                "required": [
+                    "articleIds"
+                ],
+                "oneOf": [
+                    {
+                        "required": [
+                            "datasetId"
+                        ]
+                    },
+                    {
+                        "required": [
+                            "datasetName"
+                        ]
+                    }
                 ]
             }
         },

@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./broker-server.mjs";
 import { createBrokerLauncher } from "./broker-launcher.mjs";
 import { loadOrCreateDeviceIdentity } from "./device-identity.mjs";
-import { classifyTransportError, shouldAutoRetry } from "./mcp-retry-policy.mjs";
+import { classifyTransportError, shouldAutoRetry, brokerNoResponseMessage } from "./mcp-retry-policy.mjs";
 import { contractsFingerprint, resolveBuildId } from "./build-fingerprint.mjs";
 import { AGENT_VERSION } from "./version.mjs";
 // 静态 import 而非 fs 读取：standalone 产物（bun compile）不内嵌运行时 readFileSync 的文件，
@@ -224,14 +224,13 @@ const BROKER_UNREACHABLE_RESULT = () =>
         true
     );
 
-const BROKER_NO_RESPONSE_RESULT = () =>
+const BROKER_NO_RESPONSE_RESULT = (tool) =>
     resultText(
         {
             ok: false,
             error: {
                 code: "BROKER_NO_RESPONSE",
-                message:
-                    "请求已送达 Broker 但未在时限内收到响应，执行结果未知。先调 xhs_task_status 确认是否已生效，不要直接重发本调用。",
+                message: brokerNoResponseMessage(tool),
                 context: { possiblyExecuted: true },
             },
         },
@@ -267,7 +266,7 @@ async function callBroker(tool, args, { signal } = {}) {
         // cancelled（本方 45s 超时/宿主取消）与非白名单工具的 response_unknown 都不自动重发：
         // 此时请求已送达、结果未知，统一返回结构化 BROKER_NO_RESPONSE（宿主取消的结果
         // 本就被 dispatch 丢弃，不影响该路径；本方超时是「已派发、结果未知」的典型形态）
-        if (!shouldAutoRetry(cls, tool)) return BROKER_NO_RESPONSE_RESULT();
+        if (!shouldAutoRetry(cls, tool)) return BROKER_NO_RESPONSE_RESULT(tool);
         // not_reached → Broker 已掉线：清健康缓存后重新探测/拉起；response_unknown（幂等工具）→ Broker 仍活着，直接重发
         if (cls === "not_reached") {
             launcher.invalidate();
@@ -277,7 +276,7 @@ async function callBroker(tool, args, { signal } = {}) {
             return await postToolCall(tool, args, { requestId, signal });
         } catch {
             // 重发仍失败：按首次分类给出结构化码，不产出契约外的裸错误
-            return cls === "not_reached" ? BROKER_UNREACHABLE_RESULT() : BROKER_NO_RESPONSE_RESULT();
+            return cls === "not_reached" ? BROKER_UNREACHABLE_RESULT() : BROKER_NO_RESPONSE_RESULT(tool);
         }
     }
 }

@@ -1,8 +1,12 @@
 /**
- * MCP 工具执行器（设计文档 §6.3 / 详细设计 §2.2）——11 工具。
+ * MCP 工具执行器（设计文档 §6.3 / 详细设计 §2.2）——14 工具。
  *
  * - 数据集类（list/create/rename）经 WS sync.request 透传到插件；list_datasets 离线可降级读快照
  *   （source:"cache"），其余离线返回 EXTENSION_OFFLINE；
+ * - 数据读取类（dataset_overview/list_articles/read_articles）恒走活体 sync.request，
+ *   不做离线快照；响应体积由插件侧组装期预算控制，Broker 只透传 truncated；
+ * - 统一 VIP 门禁：除 connection_status/prepare_env 外的工具在 executeTool 入口单点拦截
+ *   （提示性拦截，权威校验在插件侧）；
  * - connection_status 离线补 lastKnown（取自会话快照）/canWake/alerts；
  * - prepare_env 纯唤醒（幂等、不占单飞、不耗配额），不返回数据集；
  * - start_crawl 立即返回 task handle（慢路径在状态机里，M2 实证模式）；
@@ -26,6 +30,25 @@ const ok = (data) => ({ ok: true, data });
 const PROCESS_BUILD_ID = resolveBuildId();
 
 const XHS_URL_HOST_SUFFIX = "xiaohongshu.com";
+
+/**
+ * 统一 VIP 门禁：仅这两项豁免。connection_status 是诊断会员态的入口；
+ * prepare_env 是冷启动唤醒（不返回业务数据），豁免后才能打破「无 lastKnown 就拉不起浏览器」的死锁。
+ * 门禁只是提示性拦截，权威校验在插件侧（加密信封 + fail-closed）。
+ */
+export const VIP_EXEMPT_TOOL_NAMES = Object.freeze(["xhs_connection_status", "xhs_prepare_env"]);
+const VIP_EXEMPT_TOOLS = new Set(VIP_EXEMPT_TOOL_NAMES);
+
+/** 数据读取类 action：VIP 门禁后、转发前检查设备批准，避免 sync.request 被插件丢弃后白等超时 */
+export const DATA_READ_TOOL_NAMES = Object.freeze(["xhs_dataset_overview", "xhs_list_articles", "xhs_read_articles"]);
+const DATA_READ_TOOLS = new Set(DATA_READ_TOOL_NAMES);
+
+/** 按工具名设置转发超时：读类比控制类更宽松（overview/list 15s、read 30s、控制类保持 10s） */
+const TOOL_SYNC_TIMEOUTS = {
+    xhs_dataset_overview: 15_000,
+    xhs_list_articles: 15_000,
+    xhs_read_articles: 30_000,
+};
 
 /**
  * 由任务参数构造拉起用深链（§9.1 步骤 6）。纯函数：无 keyword/noteUrl 时返回 null（空白页）。
@@ -161,11 +184,39 @@ export function createToolExecutor({
     // sync.request 透传（数据集类）
     // ------------------------------------------------------------------
 
-    async function syncRequest(action, params) {
+    async function syncRequest(action, params, timeoutMs = options.syncTimeoutMs) {
         if (!session.isConnected()) {
             return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
         }
-        return session.syncRequest(action, params, options.syncTimeoutMs);
+        return session.syncRequest(action, params, timeoutMs);
+    }
+
+    function syncTimeoutFor(tool) {
+        return TOOL_SYNC_TIMEOUTS[tool] ?? options.syncTimeoutMs;
+    }
+
+    /**
+     * 会话会员态：在线取握手/实时刷新的缓存；离线优先 lastKnown（会话快照），
+     * 再退到扩展会话缓存（同样是最后一次 hello 的事实）。两者皆无 = 从未连接过 → fail-closed。
+     */
+    function sessionVip() {
+        const info = session.extensionInfo();
+        // 在线时**只认活体会话**：hello 上报 vip:null（未登录/登出）必须 fail-closed，
+        // 不能回落到 24h 内可能仍写着 vip:true 的离线快照。
+        if (info?.connected) return info.vip ?? null;
+        // 离线：优先 lastKnown（会话快照），再退到会话缓存（同样来自最后一次 hello）
+        const cached = snapshotStore?.readSession?.({ extId: info?.extId ?? null }) ?? null;
+        return cached?.session?.vip ?? info?.vip ?? null;
+    }
+
+    /** Broker 侧 VIP 门禁（提示性；权威校验在插件侧）。返回错误对象或 null。 */
+    function vipGate(tool) {
+        if (VIP_EXEMPT_TOOLS.has(tool)) return null;
+        if (sessionVip()?.isVip === true) return null;
+        return err(
+            "VIP_REQUIRED",
+            "AI 联动为 VIP 专属能力（非 VIP 或会员态无法确认）。如刚开通会员，请先调 xhs_connection_status 刷新会员态；浏览器未连接可先调 xhs_prepare_env 唤醒"
+        );
     }
 
     /**
@@ -709,7 +760,7 @@ export function createToolExecutor({
     // ------------------------------------------------------------------
 
     async function executeTool(tool, args, ctx = {}) {
-        // action 级限流（§10.5）：未知工具不计数，已知工具先在滑窗内判定
+        // 1. action 级限流（§10.5）：未知工具不计数，已知工具先在滑窗内判定
         if (rateLimiter && findTool(tool)) {
             const verdict = rateLimiter.check(tool);
             if (!verdict.ok) {
@@ -717,11 +768,19 @@ export function createToolExecutor({
                 return err(verdict.reason, verdict.message);
             }
         }
-        // xhs_start_crawl 自带参数校验（keyword/noteUrl 互斥与 resumeTaskId 显式拒绝为 schema
-        // 之外的语义），先于通用校验分派
+        // 2. 未知工具先判，避免被 VIP 错误码掩盖（VIP 门禁对未知工具没有意义）
+        if (!findTool(tool)) return err("UNKNOWN_TOOL", `未知工具: ${tool}`);
+        // 3. 统一 VIP 门禁（豁免 connection_status / prepare_env）
+        const denied = vipGate(tool);
+        if (denied) return denied;
+        // 4. 数据读取类：设备未批准时插件会丢弃 sync.request，直接回码而不是白等到超时
+        if (DATA_READ_TOOLS.has(tool) && session.extensionInfo()?.deviceApproved === false) {
+            return err("DEVICE_NOT_APPROVED", "设备未批准或已被撤销，请在红探插件设置 →「Agent 接管」中批准本机设备");
+        }
+        // 5. xhs_start_crawl 自带参数校验（keyword/noteUrl 互斥与 resumeTaskId 显式拒绝为 schema
+        //    之外的语义），先于通用校验分派
         if (tool === "xhs_start_crawl") return toolStartCrawl(args);
         const schemaError = validate(tool, args);
-        if (schemaError === "UNKNOWN_TOOL") return err("UNKNOWN_TOOL", `未知工具: ${tool}`);
         if (schemaError) return err("INVALID_ARGS", schemaError);
         audit?.append("tool_call", { tool });
         switch (tool) {
@@ -739,6 +798,12 @@ export function createToolExecutor({
                     ...(args?.name ? { name: args.name } : {}),
                     newName: args?.newName,
                 });
+            case "xhs_dataset_overview":
+                return syncRequest("dataset_overview", { ...args }, syncTimeoutFor(tool));
+            case "xhs_list_articles":
+                return syncRequest("list_articles", { ...args }, syncTimeoutFor(tool));
+            case "xhs_read_articles":
+                return syncRequest("read_articles", { ...args }, syncTimeoutFor(tool));
             case "xhs_task_status":
                 return toolTaskStatus(args);
             case "xhs_task_list":

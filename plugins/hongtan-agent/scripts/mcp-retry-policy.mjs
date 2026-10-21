@@ -44,6 +44,24 @@ export const IDEMPOTENT_TOOLS = new Set([
     "xhs_wait_for_task",
 ]);
 
+/**
+ * 数据读取工具：幂等只读，但单次响应最大 800k。超时后自动重发会重复拉取大响应，
+ * 因此刻意不放进 IDEMPOTENT_TOOLS；由 BROKER_NO_RESPONSE 指引 AI 用更小范围手动重试。
+ */
+export const DATA_READ_TOOLS = new Set([
+    "xhs_dataset_overview",
+    "xhs_list_articles",
+    "xhs_read_articles",
+]);
+
+/** BROKER_NO_RESPONSE 的 AI 指引：读类与启动/等待/取消类必须给不同处置 */
+export function brokerNoResponseMessage(tool) {
+    if (DATA_READ_TOOLS.has(tool)) {
+        return "请求已送达 Broker 但未在时限内完成或已被取消，执行结果未知。读类调用若确需继续，可用更小范围（更少 articleIds、更小 pageSize/commentLimit）重试一次。";
+    }
+    return "请求已送达 Broker 但未在时限内收到响应，执行结果未知。先调 xhs_task_status 确认是否已生效，禁止直接重发等待/启动/取消类调用。";
+}
+
 export function shouldAutoRetry(classification, tool) {
     if (classification === "not_reached") return true;
     if (classification === "response_unknown") return IDEMPOTENT_TOOLS.has(tool);
