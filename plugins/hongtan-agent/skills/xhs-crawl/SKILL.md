@@ -313,16 +313,17 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
 **关键纪律**：
 
 1. **漏斗优先**：禁止跳过 overview/list 对大数据集盲读；「分析整个数据集」＝ overview 结论 + 代表性笔记抽样（热门榜优先），不是全量读取。
-2. **规模自律**：读取前看 list 行的 `scrapedComments`（含回复的总数）预判，但要知道 read 的 `commentLimit` 按**顶层评论**计，两者不是同一口径；评论 >500 时先与用户确认口径（全量 / 热评取样）；`commentLimit=-1` 视为「全量、可能很大」。收到 `truncated=true` 时降低 `articleIds`/`commentLimit`/`replyLimit` 重读，不硬塞。
+2. **规模自律**：读取前看 list 行的 `scrapedComments`（含回复的总数）预判，但要知道 read 的 `commentLimit` 按**顶层评论**计，两者不是同一口径；而且只统计**最终有效**的顶层评论——被清洗消除的评论不占名额，会按 `commentSort` 向后补位，所以返回集合可能包含原本第 N 名之后的评论。评论 >500 时先与用户确认口径（全量 / 热评取样）；`commentLimit=-1` 视为「全量、可能很大」。收到 `truncated=true` 时先看数量：`commentLimit` 有限且 `returnedTopLevel` 未达目标 → 降 `articleIds`/`commentLimit` 重读；`commentLimit=-1` → 降 `articleIds` 重读；已达目标但仍为 `true` → 说明有大评论被跳过或回复被截断，需要完整热评时单独降低 `replyLimit` 重读该篇，不硬塞。
 3. **限流纪律**：连续读取注意操作频控（`RATE_LIMITED`），失败后 ≥10 秒再试，不紧密重试。
 4. **口径与清洗转译**（字段名不上屏）：
    - 双口径：「这篇笔记显示 210 条评论，实际抓取了 180 条」（实际抓取数含回复）；overview 的 `interactions.totalComments` 是页面显示总数，`dataset.scrapedCommentCount` 是已抓数。
-   - 清洗：「已应用内置清洗（全篇文章的表情/图片占位、@提及、特殊符号、无意义内容）」；用户规则开启时补「全篇额外过滤 N 条」；本次返回 M 条顶层（R 条回复）。不要把全篇清洗统计与本次返回条数相加或混用。
+   - 清洗：「已应用内置清洗（全篇文章的表情/图片占位、@提及、特殊符号、无意义内容）」；用户规则开启时补「全篇额外过滤 N 条」；本次返回 M 条顶层（R 条回复）。不要把全篇清洗统计与本次返回条数相加或混用。`cleared` 是清洗口径，可能包含读取层未返回的评论（如 `includeReplies=false` 时主评被清空且无回复的评论整条消失）。
    - 不再输出「未配置清洗规则，数据可能含表情、水评」——规则 1-4 对 AI 读取恒开，这条文案不再成立。
    - `activeCrawl=true`：「该数据集仍在抓取中，以下数据是当前时点的快照」；overview/list/read 都可能返回该标志，手工任务同样适用。
    - 标签：`tagNamesNotFound` 非空时如实说明哪些标签不存在，不要把空结果当成数据集没有内容。
    - 分页：只看 `total` / `hasMore`，不要靠空页猜结束。
-   - 缺失文章：如实说明哪些 ID 不存在或不属于该数据集；`truncatedArticleIds` 表示因体积被整体丢弃，和缺失不同。
+   - 缺失文章：如实说明哪些 ID 不存在或不属于该数据集；`truncatedArticleIds` 只表示**因预算不足整篇未返回**，和缺失不同——已返回但其中评论被跳过的文章不会列入。
+   - 读取失败：`commentsUnavailableArticleIds` 非空（或某篇 `commentsUnavailable=true`）时，不得说「这篇没有评论」，应说明「评论读取失败」，并建议用更小的 `articleIds` 重试；这类文章 `returnedTopLevel=0` 且没有 `cleaningStats`。
 5. **结论不贴数据**：读取是手段，给用户的是分析结论；禁止把渲染后的 markdown 原文大段回显（§6.5 反模式沿用）。
 6. **VIP_REQUIRED 与豁免**：除 `xhs_connection_status`、`xhs_prepare_env` 外，其余工具均可能返回 `VIP_REQUIRED`。如实说明「AI 联动为 VIP 功能」并引导开通/登录，不重试；刚开通会员可先调 `xhs_connection_status` 刷新会员态后重试；浏览器未连接可先 `xhs_prepare_env` 唤醒。
 7. **VIP 过期后的任务控制**：会员态失效后 AI 会失去任务查询/取消/窗口唤醒能力；如实告知用户「请在插件或浏览器中手动操作」，不得声称已取消或已恢复任务。

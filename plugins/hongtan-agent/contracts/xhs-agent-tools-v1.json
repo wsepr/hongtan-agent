@@ -363,7 +363,7 @@
         {
             "name": "xhs_read_articles",
             "kind": "sync",
-            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部（默认，可能超过 1000）、0=不要评论、1-1000=清洗后按 commentSort 取前 N 条顶层；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,body}（body 为渲染后的 markdown，按请求 articleIds 顺序）、missingArticleIds、truncated/truncatedArticleIds。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论边界截断，truncated=true 时应用更小范围重读。AI 联动为 VIP 专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部有效顶层（默认，可能超过 1000）、0=不要评论、1-1000=每篇目标返回 N 条有效顶层评论（各篇独立计数，不跨笔记借用名额），被清洗消除的评论不占名额，按 commentSort 向后补位，有效评论不足或触发扫描上限时返回实际数量；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true，false 时不返回回复，主评已被清洗为空且没有可返回回复的评论将不再出现；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,commentsUnavailable,body}（body 为渲染后的 markdown，按请求 articleIds 顺序；returnedTopLevel 是本次实际返回的有效顶层评论数，可能小于 commentLimit）、missingArticleIds、truncated/truncatedArticleIds、commentsUnavailableArticleIds。truncated=true 表示有评论因体积被截断/跳过、扫描达到上限，或该篇未返回（数量已满也可能为 true）；truncatedArticleIds 仅包含因预算不足而整篇未返回的笔记 ID，已返回但有评论被跳过的文章不列入。commentsUnavailable 为该篇评论读取失败标记，不等于「没有评论」：该篇 returnedTopLevel=0 且不输出 cleaningStats，commentsUnavailableArticleIds 汇总失败篇目；此时应说明评论读取失败并用更小的 articleIds 重试，不得表述为「没有评论」。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论跳过/截断，truncated=true 时应用更小范围重读。AI 联动为 VIP 专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -391,7 +391,7 @@
                         "type": "integer",
                         "minimum": -1,
                         "maximum": 1000,
-                        "description": "-1=全部顶层评论；0=不要评论；1-1000=清洗后最多返回的顶层评论数；默认 -1"
+                        "description": "-1=全部有效顶层评论；0=不要评论；1-1000=每篇目标返回的有效顶层评论数（无效评论不占名额，按 commentSort 向后补位）；默认 -1"
                     },
                     "commentSort": {
                         "type": "string",
@@ -403,7 +403,7 @@
                     },
                     "includeReplies": {
                         "type": "boolean",
-                        "description": "是否包含回复楼（默认 true）"
+                        "description": "是否包含回复楼（默认 true）；false 时主评已被清洗为空且无回复的评论不再出现"
                     },
                     "replyLimit": {
                         "type": "integer",
