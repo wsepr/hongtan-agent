@@ -106,8 +106,8 @@ curl http://127.0.0.1:17373/health
 按顺序执行即可完全回到手工抓取（既有路径不受影响）：
 
 1. **停 Broker** —— 结束常驻进程；移除开机自启（`reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v HongtanAgent /f`）。
-2. **关闭插件开关** —— 红探插件设置 →「Agent 接管」→ 关闭。效果：立即断开 WS + 清除 `chrome.alarms` + 拒绝新命令 + 在途任务转 `aborted_by_user`（页面爬虫按现有逻辑继续跑完，但不再上报、不再自动恢复）。
-3. **撤销设备批准** —— 同一设置页 → 设备管理 → 逐个「撤销」（撤销即断开该设备连接）。
+2. **关闭插件开关** —— 红探插件设置 →「AI 接管」→ 关闭。效果：立即断开 WS + 清除 `chrome.alarms` + 拒绝新命令 + 在途任务转 `aborted_by_user`（页面爬虫按现有逻辑继续跑完，但不再上报、不再自动恢复）。
+3. **撤销设备授权** —— 同一设置页 →「AI 接管」→ 逐个「撤销授权」（撤销即断开该设备连接）。
 4. **卸载 Adapter / launcher** —— 从宿主移除 MCP 注册与插件包即可。
 
 ## 6. 常见故障
@@ -115,8 +115,8 @@ curl http://127.0.0.1:17373/health
 | 现象 | 排查 |
 |---|---|
 | 工具返回 `BROWSER_OFFLINE` | 本机服务正在拉起浏览器；若持续不回，确认浏览器可执行文件路径未漂移（查看 `browser.config`） |
-| 工具返回 `EXTENSION_OFFLINE` | 浏览器在跑但扩展未连。检查插件「Agent 接管」开关是否开启；SW 由 `alarms`（0.5 分钟）自愈重连，等一轮再查 |
-| 工具返回 `EXTENSION_UNAVAILABLE` | 拉起浏览器 90s 后仍无连接。检查扩展是否安装/启用、设备是否已批准 |
+| 工具返回 `EXTENSION_OFFLINE` | 浏览器在跑但扩展未连。检查插件「AI 接管」开关是否开启；SW 由 `alarms`（0.5 分钟）自愈重连，等一轮再查 |
+| 工具返回 `EXTENSION_UNAVAILABLE` | 拉起浏览器 90s 后仍无连接。检查扩展是否安装/启用、设备是否已确认 |
 | 任务反复中断 | **终态**中断（页面被关/离开站点/心跳超时/浏览器重启，以及「暂停 10 分钟内始终未恢复可见的兜底收尾」）都会记 `failed(TASK_INTERRUPTED)`（`error.reason` 归因），**不会自动恢复**；提示用户重新发起任务，并排查浏览器/页面环境（同一任务最多建议重试一次）。窗口被遮挡/最小化的 `stalled_by_background` 只是暂停——**调 `xhs_activate_window` 或请用户点任务栏窗口让它恢复可见即自动继续**，不在此列 |
 | 任务终态为 `failed/BLOCKED_BY_RISK` | 风控/验证码，任务不可复活、**不自动重试**。用户在浏览器处理完后，用原参数（同 keyword 与 datasetName、`articleLimit=remaining`、`skipExistingArticles=true`）新开任务 |
 | 任务进度长时间不动 | 多为抓取窗口被遮挡/最小化（`stalled_by_background`）。**把窗口恢复可见即自动继续**（**同一任务**，不新开；首选调 `xhs_activate_window` 抢回前台，或请用户点任务栏窗口）；v2.12 起不再自动还原/抢焦点。用户在场时先征询再调 `xhs_activate_window` 拉回前台；**10 分钟内一直未恢复可见**才会被兜底终态化为 `failed/TASK_INTERRUPTED(stalled_timeout)`（根因仍是窗口最小化/遮挡），届时按失败后重试流程处理 |

@@ -15,13 +15,13 @@
     },
     "errorCodes": {
         "AGENT_DISABLED": {
-            "message": "插件「Agent 接管」总开关为关",
-            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中开启；不要重试。重复执行只会再次被拒，开关不解决重试无意义。",
+            "message": "插件「AI 接管」总开关为关",
+            "aiGuidance": "提示用户在红探插件设置 →「AI 接管」中开启；不要重试。重复执行只会再次被拒，开关不解决重试无意义。",
             "retryable": false
         },
         "DEVICE_NOT_APPROVED": {
-            "message": "设备未批准或已被撤销",
-            "aiGuidance": "提示用户在红探插件设置 →「Agent 接管」中核对本机设备指纹并点击批准。重复执行无意义，必须先完成人工批准。",
+            "message": "设备未确认或已被撤销",
+            "aiGuidance": "提示用户在红探插件设置 →「AI 接管」中核对设备核对码并点击确认。重复执行无意义，必须先完成人工确认。",
             "retryable": false
         },
         "BROWSER_UNRESOLVABLE": {
@@ -36,17 +36,17 @@
         },
         "EXTENSION_UNAVAILABLE": {
             "message": "拉起浏览器后扩展仍未连接",
-            "aiGuidance": "说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 chrome://extensions 与插件的 Agent 接管开关。重复执行无法修复安装/权限问题。",
+            "aiGuidance": "说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 chrome://extensions 与插件的 AI 接管开关。重复执行无法修复安装/权限问题。",
             "retryable": false
         },
         "PROTOCOL_VERSION_MISMATCH": {
             "message": "协议版本不匹配",
-            "aiGuidance": "提示用户升级红探插件或红探 Agent 运行时。重复执行结果相同，必须先升级。",
+            "aiGuidance": "提示用户升级红探插件或红探本机服务。重复执行结果相同，必须先升级。",
             "retryable": false
         },
         "VIP_REQUIRED": {
-            "message": "AI 联动为 VIP 专属能力（非 VIP 或会员态无法确认）",
-            "aiGuidance": "如实说明「AI 联动为 VIP 功能」，引导用户开通会员或登录红探账号；不要重试。除 xhs_connection_status、xhs_prepare_env 外，其余工具均需 VIP。刚开通会员可先调 xhs_connection_status 刷新会员态后重试；浏览器未连接可先调 xhs_prepare_env 唤醒（它不受 VIP 门禁限制）。重复执行只会再次被拒。",
+            "message": "AI 接管为会员功能（非会员或会员状态无法确认）",
+            "aiGuidance": "如实说明「AI 接管为会员功能」，引导用户开通会员或登录红探账号；不要重试。除 xhs_connection_status、xhs_prepare_env 外，其余工具均需 VIP。刚开通会员可先调 xhs_connection_status 刷新会员态后重试；浏览器未连接可先调 xhs_prepare_env 唤醒（它不受 VIP 门禁限制）。重复执行只会再次被拒。",
             "retryable": false
         },
         "NOT_LOGGED_IN": {
@@ -151,7 +151,7 @@
         },
         "BROKER_UNREACHABLE": {
             "message": "Broker 未运行且自动拉起失败",
-            "aiGuidance": "提示用户手动启动红探 Agent 服务（node scripts/broker-server.mjs）后再试；不要紧密重试。",
+            "aiGuidance": "提示用户手动启动红探本机服务（node scripts/broker-server.mjs）后再试；不要紧密重试。",
             "retryable": false
         }
     },
@@ -255,7 +255,7 @@
         {
             "name": "xhs_dataset_overview",
             "kind": "sync",
-            "description": "数据集概览（分析第一步）：返回数据集基本信息（id、name、articleCount、scrapedCommentCount）、笔记发布时间范围（timeRange）、互动汇总（interactions.totalLikes/avgLikes/totalCollects/totalComments，avgLikes 为总赞/笔记数并保留 1 位小数）、按点赞与按评论数排序的 Top5 笔记摘要（hotArticles.byLikes/byComments，摘要字段 id/title/likeCount/commentCount/scrapedCommentCount，其中 id 供 xhs_read_articles 使用）、标签分布（tagDistribution）与抓取状态（activeCrawl/activeCrawlSource/crawlingHint）。纯笔记层聚合，不加载正文与评论，适合先建立全局认识再决定读哪几篇。datasetId 与 datasetName 必须二选一（同时传或都不传 → INVALID_ARGS）；数据集不存在 → DATASET_NOT_FOUND。AI 联动为 VIP 专属；读取恒为实时查询（无离线快照），扩展离线时先调 xhs_prepare_env 唤醒。",
+            "description": "数据集概览（分析第一步）：返回数据集基本信息（id、name、articleCount、scrapedCommentCount）、笔记发布时间范围（timeRange）、互动汇总（interactions.totalLikes/avgLikes/totalCollects/totalComments，avgLikes 为总赞/笔记数并保留 1 位小数）、按点赞与按评论数排序的 Top5 笔记摘要（hotArticles.byLikes/byComments，摘要字段 id/title/likeCount/commentCount/scrapedCommentCount，其中 id 供 xhs_read_articles 使用）、标签分布（tagDistribution）与抓取状态（activeCrawl/activeCrawlSource/crawlingHint）。纯笔记层聚合，不加载正文与评论，适合先建立全局认识再决定读哪几篇。datasetId 与 datasetName 必须二选一（同时传或都不传 → INVALID_ARGS）；数据集不存在 → DATASET_NOT_FOUND。AI 接管为会员专属；读取恒为实时查询（无离线快照），扩展离线时先调 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -288,7 +288,7 @@
         {
             "name": "xhs_list_articles",
             "kind": "sync",
-            "description": "浏览数据集中的笔记列表并按条件筛选分析目标（S2）。datasetId 与 datasetName 必须二选一。page 默认 1；pageSize 默认 30、最大 1000；pageSize>100 时自动精简行字段为 id/title/publishTime/likes/comments/scrapedComments/scrapedAt，响应 compact=true，并忽略 includeTags（回 tagsOmitted=true）——大页只用于枚举统计，需要标签时用 pageSize<=100。sort 默认 scrapedTime（最近一次入库/重抓时间倒序，此时行内附 scrapedAt）；publishTime/likeCount/commentCount/collectCount 按对应字段倒序。scrapedAfter/scrapedBefore 按抓取时间（YYYY-MM-DD，article.createdAt）过滤。tagNames 最多 5 个、OR 语义（命中任一即保留），未匹配的名称在 tagNamesNotFound 回传；includeTags 默认 false（有 tagNames 时自动为 true）。响应含 page/pageSize/total/totalPages/hasMore 与 activeCrawl/activeCrawlSource/crawlingHint。comments=笔记页显示的评论总数，scrapedComments=实际抓取总数（含回复）。刻意不返回正文、链接、作者 ID。AI 联动为 VIP 专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "description": "浏览数据集中的笔记列表并按条件筛选分析目标（S2）。datasetId 与 datasetName 必须二选一。page 默认 1；pageSize 默认 30、最大 1000；pageSize>100 时自动精简行字段为 id/title/publishTime/likes/comments/scrapedComments/scrapedAt，响应 compact=true，并忽略 includeTags（回 tagsOmitted=true）——大页只用于枚举统计，需要标签时用 pageSize<=100。sort 默认 scrapedTime（最近一次入库/重抓时间倒序，此时行内附 scrapedAt）；publishTime/likeCount/commentCount/collectCount 按对应字段倒序。scrapedAfter/scrapedBefore 按抓取时间（YYYY-MM-DD，article.createdAt）过滤。tagNames 最多 5 个、OR 语义（命中任一即保留），未匹配的名称在 tagNamesNotFound 回传；includeTags 默认 false（有 tagNames 时自动为 true）。响应含 page/pageSize/total/totalPages/hasMore 与 activeCrawl/activeCrawlSource/crawlingHint。comments=笔记页显示的评论总数，scrapedComments=实际抓取总数（含回复）。刻意不返回正文、链接、作者 ID。AI 接管为会员专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -363,7 +363,7 @@
         {
             "name": "xhs_read_articles",
             "kind": "sync",
-            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部有效顶层（默认，可能超过 1000）、0=不要评论、1-1000=每篇目标返回 N 条有效顶层评论（各篇独立计数，不跨笔记借用名额），被清洗消除的评论不占名额，按 commentSort 向后补位，有效评论不足或触发扫描上限时返回实际数量；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true，false 时不返回回复，主评已被清洗为空且没有可返回回复的评论将不再出现；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,commentsUnavailable,body}（body 为渲染后的 markdown，按请求 articleIds 顺序；returnedTopLevel 是本次实际返回的有效顶层评论数，可能小于 commentLimit）、missingArticleIds、truncated/truncatedArticleIds、commentsUnavailableArticleIds。truncated=true 表示有评论因体积被截断/跳过、扫描达到上限，或该篇未返回（数量已满也可能为 true）；truncatedArticleIds 仅包含因预算不足而整篇未返回的笔记 ID，已返回但有评论被跳过的文章不列入。commentsUnavailable 为该篇评论读取失败标记，不等于「没有评论」：该篇 returnedTopLevel=0 且不输出 cleaningStats，commentsUnavailableArticleIds 汇总失败篇目；此时应说明评论读取失败并用更小的 articleIds 重试，不得表述为「没有评论」。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论跳过/截断，truncated=true 时应用更小范围重读。AI 联动为 VIP 专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部有效顶层（默认，可能超过 1000）、0=不要评论、1-1000=每篇目标返回 N 条有效顶层评论（各篇独立计数，不跨笔记借用名额），被清洗消除的评论不占名额，按 commentSort 向后补位，有效评论不足或触发扫描上限时返回实际数量；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true，false 时不返回回复，主评已被清洗为空且没有可返回回复的评论将不再出现；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,commentsUnavailable,body}（body 为渲染后的 markdown，按请求 articleIds 顺序；returnedTopLevel 是本次实际返回的有效顶层评论数，可能小于 commentLimit）、missingArticleIds、truncated/truncatedArticleIds、commentsUnavailableArticleIds。truncated=true 表示有评论因体积被截断/跳过、扫描达到上限，或该篇未返回（数量已满也可能为 true）；truncatedArticleIds 仅包含因预算不足而整篇未返回的笔记 ID，已返回但有评论被跳过的文章不列入。commentsUnavailable 为该篇评论读取失败标记，不等于「没有评论」：该篇 returnedTopLevel=0 且不输出 cleaningStats，commentsUnavailableArticleIds 汇总失败篇目；此时应说明评论读取失败并用更小的 articleIds 重试，不得表述为「没有评论」。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论跳过/截断，truncated=true 时应用更小范围重读。AI 接管为会员专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -456,7 +456,7 @@
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 500,
-                        "description": "本任务最多抓取篇数（必填，1-500；与数据集已有数量无关，同一数据集可被多次任务累加；AI 联动为 VIP 专属，非 VIP 一律返回 VIP_REQUIRED，不会降级成更少篇数执行）"
+                        "description": "本任务最多抓取篇数（必填，1-500；与数据集已有数量无关，同一数据集可被多次任务累加；AI 接管为会员专属，非 VIP 一律返回 VIP_REQUIRED，不会降级成更少篇数执行）"
                     },
                     "config": {
                         "type": "object",

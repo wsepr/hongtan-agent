@@ -186,7 +186,7 @@ export function createToolExecutor({
 
     async function syncRequest(action, params, timeoutMs = options.syncTimeoutMs) {
         if (!session.isConnected()) {
-            return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
+            return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 AI 接管），稍后可恢复");
         }
         return session.syncRequest(action, params, timeoutMs);
     }
@@ -215,7 +215,7 @@ export function createToolExecutor({
         if (sessionVip()?.isVip === true) return null;
         return err(
             "VIP_REQUIRED",
-            "AI 联动为 VIP 专属能力（非 VIP 或会员态无法确认）。如刚开通会员，请先调 xhs_connection_status 刷新会员态；浏览器未连接可先调 xhs_prepare_env 唤醒"
+            "AI 接管为会员功能（非会员或会员状态无法确认）。如刚开通会员，请先调 xhs_connection_status 刷新会员态；浏览器未连接可先调 xhs_prepare_env 唤醒"
         );
     }
 
@@ -410,12 +410,12 @@ export function createToolExecutor({
     async function toolListDatasets() {
         if (session.isConnected()) {
             const r = await session.syncRequest("list_datasets", {}, options.syncTimeoutMs);
-            if (!r?.ok) return r ?? err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
+            if (!r?.ok) return r ?? err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 AI 接管），稍后可恢复");
             return ok({ datasets: r.data?.datasets ?? [], source: "live" });
         }
         const cached = snapshotStore?.readDatasets?.({ extId: session.extensionInfo()?.extId ?? null }) ?? null;
         if (cached) return ok({ datasets: cached.datasets, source: "cache", stale: true, cachedAt: cached.cachedAt });
-        return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 Agent 接管），稍后可恢复");
+        return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 AI 接管），稍后可恢复");
     }
 
     /** 修复式拉起（R2，详细设计 §7.2）：仅「账本有活跃任务 + 扩展离线（矛盾信号）」时触发一次 */
@@ -596,7 +596,7 @@ export function createToolExecutor({
                 taskStore.setState(current, "failed", {
                     error: {
                         code: "EXTENSION_UNAVAILABLE",
-                        message: "拉起浏览器后扩展仍未连接。请检查：浏览器是否成功启动、扩展是否已安装/启用、Agent 接管开关是否打开",
+                        message: "拉起浏览器后扩展仍未连接。请检查：浏览器是否成功启动、扩展是否已安装/启用、AI 接管开关是否打开",
                     },
                 });
                 audit?.append("task_failed", { taskId: task.id, code: "EXTENSION_UNAVAILABLE" });
@@ -775,7 +775,7 @@ export function createToolExecutor({
         if (denied) return denied;
         // 4. 数据读取类：设备未批准时插件会丢弃 sync.request，直接回码而不是白等到超时
         if (DATA_READ_TOOLS.has(tool) && session.extensionInfo()?.deviceApproved === false) {
-            return err("DEVICE_NOT_APPROVED", "设备未批准或已被撤销，请在红探插件设置 →「Agent 接管」中批准本机设备");
+            return err("DEVICE_NOT_APPROVED", "设备未确认或已被撤销，请在红探插件设置 →「AI 接管」中确认本机设备");
         }
         // 5. xhs_start_crawl 自带参数校验（keyword/noteUrl 互斥与 resumeTaskId 显式拒绝为 schema
         //    之外的语义），先于通用校验分派

@@ -308,13 +308,13 @@ export function createBroker({
         if (!extensionSession) {
             // 浏览器多半没开：不要把「请人工开浏览器」当唯一出路——start_crawl 会自动拉起（§9.1 步骤 6），
             // 仅首次引导（扩展从未连接过、无从解析浏览器配置）才需要人工兜底
-            return "可直接发起抓取任务（本机服务会自动拉起浏览器）；若启动后报 EXTENSION_UNAVAILABLE，请人工打开浏览器检查插件安装与 Agent 接管开关";
+            return "可直接发起抓取任务（本机服务会自动拉起浏览器）；若启动后报 EXTENSION_UNAVAILABLE，请人工打开浏览器检查插件安装与 AI 接管开关";
         }
         if (!extensionSession.agentEnabled) {
-            return "请在红探插件设置 →「Agent 接管」中开启开关";
+            return "请在红探插件设置 →「AI 接管」中开启开关";
         }
         if (!extensionSession.deviceApproved) {
-            return "请在红探插件设置 →「Agent 接管」→ 设备管理中核对本机指纹并点击批准";
+            return "请在红探插件设置 →「AI 接管」中核对设备核对码并点击确认";
         }
         return null;
     }
@@ -508,7 +508,7 @@ export function createBroker({
                     reason: "LEGACY_PROTOCOL_UNSUPPORTED",
                     expected: "extension.hello",
                     protocolVersion: contracts?.protocolVersion ?? null,
-                    message: "本机 Agent 仅接受 extension.hello 握手，请更新扩展",
+                    message: "本机服务只接受新版插件的连接，请更新扩展",
                 });
                 audit.append("hello_reject", { reason: "LEGACY_PROTOCOL_UNSUPPORTED", got: msg.type, ...peerTrace });
                 // 已给出明确信号，别让 5s 超时再补一条重复留痕

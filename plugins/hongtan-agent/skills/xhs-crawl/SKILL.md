@@ -20,7 +20,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 1. **`xhs_connection_status`** —— 先确认链路就绪。读取：
    - `extension.connected`（扩展是否已连上本机服务）
-   - `extension.agentEnabled` / `extension.deviceApproved`（开关与设备批准）
+   - `extension.agentEnabled` / `extension.deviceApproved`（开关与设备确认）
    - `vip.isVip` 与 `vip.effectiveArticleLimit`（会员态与本次可用篇数上限）
    - `quota`（任务节奏配额快照；`readyAt` 非空 = 需等到该时刻才能启动——先告知用户并等待，**不要试跑**，见 §2.7）
    - `lastKnown`（**离线时**的上次在线会话摘要：`lastSeenAt` / `vip` / `quota` / `extId` / `browserFamily` / `cachedAt`；在线时为 `null`）
@@ -57,9 +57,9 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 | 步骤 | 判据 | 你要用户做的事 |
 |---|---|---|
-| ① 开关就绪 | `extension.agentEnabled === false` | 请用户在插件设置 →「Agent 接管」中打开总开关 |
-| ② 设备批准 | `extension.deviceApproved === false` | 请用户在插件设置 →「Agent 接管」→ 设备管理中核对本机指纹并点击批准（`pairing.fingerprint` 可复述给用户核对） |
-| ③ 会员态 | ①② 就绪但 `vip.isVip === false` | 如实说明「AI 联动为 VIP 功能」，引导开通会员或登录红探账号 |
+| ① 开关就绪 | `extension.agentEnabled === false` | 请用户在插件设置 →「AI 接管」中打开总开关 |
+| ② 设备确认 | `extension.deviceApproved === false` | 请用户在插件设置 →「AI 接管」中核对设备核对码并点击确认（`pairing.fingerprint` 可复述给用户核对） |
+| ③ 会员态 | ①② 就绪但 `vip.isVip === false` | 如实说明「AI 接管为会员功能」，引导开通会员或登录红探账号 |
 
 人工路径**每一步都等用户回话后再复查**，不要连续调用工具空转；每次只报**当前卡住的那一步**（输出按 §6.5「环境未就绪」模板），不要一次列出三步；全绿后才进入工具选用决策树的第 3 步。
 
@@ -166,13 +166,13 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 
 | 错误码 | 你应当做的 |
 |---|---|
-| `AGENT_DISABLED` | 提示用户在红探插件设置 →「Agent 接管」中开启；**不重试** |
-| `DEVICE_NOT_APPROVED` | 提示用户在插件设置 →「Agent 接管」→ 设备管理中核对指纹并批准 |
+| `AGENT_DISABLED` | 提示用户在红探插件设置 →「AI 接管」中开启；**不重试** |
+| `DEVICE_NOT_APPROVED` | 提示用户在插件设置 →「AI 接管」中核对设备核对码并确认 |
 | `EXTENSION_OFFLINE` | 说明「采集扩展暂时休眠，稍后即可恢复」；**禁止紧密重试**，稍后（≥10 秒）再查 |
 | `EXTENSION_UNAVAILABLE` | 说明扩展可能未安装、被禁用或权限被撤销，提示用户检查 `chrome://extensions` |
 | `BROWSER_UNRESOLVABLE` | 本机服务解析不出要拉起的浏览器。按下方「诊断、尝试拉起与引导」阶梯逐级处理：只读定位 → 经宿主 shell 尝试启动并**验证扩展已连上** → 仍失败才请用户手动打开 |
-| `PROTOCOL_VERSION_MISMATCH` | 提示升级红探插件或红探 Agent 运行时 |
-| `VIP_REQUIRED` | 如实说明「AI 联动为 VIP 功能」，引导开通会员或登录红探账号；**不重试**。除 `xhs_connection_status`、`xhs_prepare_env` 外，其余工具均需 VIP。刚开通会员可先调 `xhs_connection_status` 刷新会员态后重试；浏览器未连接可先 `xhs_prepare_env` 唤醒。VIP 过期后任务控制类工具同样被拒——请用户在插件/浏览器手动操作，不声称已取消或已恢复 |
+| `PROTOCOL_VERSION_MISMATCH` | 提示升级红探插件或红探本机服务 |
+| `VIP_REQUIRED` | 如实说明「AI 接管为会员功能」，引导开通会员或登录红探账号；**不重试**。除 `xhs_connection_status`、`xhs_prepare_env` 外，其余工具均需 VIP。刚开通会员可先调 `xhs_connection_status` 刷新会员态后重试；浏览器未连接可先 `xhs_prepare_env` 唤醒。VIP 过期后任务控制类工具同样被拒——请用户在插件/浏览器手动操作，不声称已取消或已恢复 |
 | `NOT_LOGGED_IN` | 提示用户在浏览器中登录小红书后重试 |
 | `LOGIN_WALL` | 现象是「页面能打开但结果列表为空」。提示用户登录小红书后重试 |
 | `CONTENT_NOT_READY` | 说明页面类型可能不符或被重定向；**最多允许重试一次** |
@@ -192,7 +192,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 | `BROKER_NO_RESPONSE` | 请求已送达但结果未知——**先调 `xhs_task_status` 确认是否已生效，禁止直接重发等待/启动/取消类调用**。读类调用若确需继续，可用更小范围（更少 `articleIds`、更小 `pageSize`/`commentLimit`）重试一次 |
 | `RUNTIME_STALE` | 运行进程旧于当前契约——按消息里的 pid 结束该进程，下一次工具调用会自动重拉新版本；不要反复重试 |
 | `BROKER_ERROR` | Broker 内部执行异常——启动/等待/取消类调用可能已部分生效，先 `xhs_task_status` 确认现场再决定是否重试；持续出现说明运行时异常 |
-| `BROKER_UNREACHABLE` | Broker 未运行且自动拉起失败——提示用户手动启动红探 Agent 服务后再试；不要紧密重试 |
+| `BROKER_UNREACHABLE` | Broker 未运行且自动拉起失败——提示用户手动启动红探本机服务后再试；不要紧密重试 |
 
 **`BROWSER_UNRESOLVABLE` 的诊断、尝试拉起与引导（阶梯式，逐级退守，不要跳级）**：
 
@@ -260,7 +260,7 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
 | 失败 / 中断 | 三段，各一句：① 发生了什么（人话）+ 错误码，如「抓取页被关闭了（`TASK_INTERRUPTED(tab_closed)`）」；② 影响：「已入库 35 篇不受影响，还差 65 篇」；③ 处置：「要我用原条件补抓剩余 65 篇吗？」 |
 | 风控拦截 | 「触发小红书验证（`BLOCKED_BY_RISK`），需要你在浏览器里手动完成验证；处理完告诉我，我再重新发起。」 |
 | 配额冷却 | 「上一次采集还在冷却，14:35 之后才能开始下一次。」用户追问时才解释「按上次请求量折算，属正常风控保护」 |
-| 环境未就绪 | 只报**当前卡住的那一步**：「差一步：请在插件设置 →「Agent 接管」中打开总开关。」用户处理完再讲下一步，不要一次列出三步 |
+| 环境未就绪 | 只报**当前卡住的那一步**：「差一步：请在插件设置 →「AI 接管」中打开总开关。」用户处理完再讲下一步，不要一次列出三步 |
 | 离线快照 | 结论在前，新鲜度作括注：「（数据来自上次在线 10:32，可能已变化）」 |
 | 离场复盘 | 一句话总结论 →「你不在时：扩展离线过 1 次」→「任务：已完成」→「本次入库 35 篇 / 数据集累计 120 篇」。每条一行，不贴告警原始字段 |
 
@@ -325,7 +325,7 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
    - 缺失文章：如实说明哪些 ID 不存在或不属于该数据集；`truncatedArticleIds` 只表示**因预算不足整篇未返回**，和缺失不同——已返回但其中评论被跳过的文章不会列入。
    - 读取失败：`commentsUnavailableArticleIds` 非空（或某篇 `commentsUnavailable=true`）时，不得说「这篇没有评论」，应说明「评论读取失败」，并建议用更小的 `articleIds` 重试；这类文章 `returnedTopLevel=0` 且没有 `cleaningStats`。
 5. **结论不贴数据**：读取是手段，给用户的是分析结论；禁止把渲染后的 markdown 原文大段回显（§6.5 反模式沿用）。
-6. **VIP_REQUIRED 与豁免**：除 `xhs_connection_status`、`xhs_prepare_env` 外，其余工具均可能返回 `VIP_REQUIRED`。如实说明「AI 联动为 VIP 功能」并引导开通/登录，不重试；刚开通会员可先调 `xhs_connection_status` 刷新会员态后重试；浏览器未连接可先 `xhs_prepare_env` 唤醒。
+6. **VIP_REQUIRED 与豁免**：除 `xhs_connection_status`、`xhs_prepare_env` 外，其余工具均可能返回 `VIP_REQUIRED`。如实说明「AI 接管为会员功能」并引导开通/登录，不重试；刚开通会员可先调 `xhs_connection_status` 刷新会员态后重试；浏览器未连接可先 `xhs_prepare_env` 唤醒。
 7. **VIP 过期后的任务控制**：会员态失效后 AI 会失去任务查询/取消/窗口唤醒能力；如实告知用户「请在插件或浏览器中手动操作」，不得声称已取消或已恢复任务。
 
 **采集完成后的衔接**：任务完成模板已改为「需要我直接分析这批数据吗？」；用户同意后从本节漏斗的第一步开始，不追加重复询问。
