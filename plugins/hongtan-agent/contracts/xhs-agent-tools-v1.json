@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 2,
-    "toolsVersion": 12,
+    "toolsVersion": 13,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -363,7 +363,7 @@
         {
             "name": "xhs_read_articles",
             "kind": "sync",
-            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部有效顶层（默认，可能超过 1000）、0=不要评论、1-1000=每篇目标返回 N 条有效顶层评论（各篇独立计数，不跨笔记借用名额），被清洗消除的评论不占名额，按 commentSort 向后补位，有效评论不足或触发扫描上限时返回实际数量；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true，false 时不返回回复，主评已被清洗为空且没有可返回回复的评论将不再出现；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,commentsUnavailable,body}（body 为渲染后的 markdown，按请求 articleIds 顺序；returnedTopLevel 是本次实际返回的有效顶层评论数，可能小于 commentLimit）、missingArticleIds、truncated/truncatedArticleIds、commentsUnavailableArticleIds。truncated=true 表示有评论因体积被截断/跳过、扫描达到上限，或该篇未返回（数量已满也可能为 true）；truncatedArticleIds 仅包含因预算不足而整篇未返回的笔记 ID，已返回但有评论被跳过的文章不列入。commentsUnavailable 为该篇评论读取失败标记，不等于「没有评论」：该篇 returnedTopLevel=0 且不输出 cleaningStats，commentsUnavailableArticleIds 汇总失败篇目；此时应说明评论读取失败并用更小的 articleIds 重试，不得表述为「没有评论」。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论跳过/截断，truncated=true 时应用更小范围重读。AI 接管为会员专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部有效顶层（默认，可能超过 2000）、0=不要评论、1-2000=每篇目标返回 N 条有效顶层评论（各篇独立计数，不跨笔记借用名额），被清洗消除的评论不占名额，按 commentSort 向后补位，有效评论不足或触发扫描上限时返回实际数量；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true，false 时不返回回复，主评已被清洗为空且没有可返回回复的评论将不再出现；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,commentsUnavailable,body}（body 为渲染后的 markdown，按请求 articleIds 顺序；returnedTopLevel 是本次实际返回的有效顶层评论数，可能小于 commentLimit）、missingArticleIds、truncated/truncatedArticleIds、commentsUnavailableArticleIds。truncated=true 表示有评论因体积被截断/跳过、扫描达到上限，或该篇未返回（数量已满也可能为 true）；truncatedArticleIds 仅包含因预算不足而整篇未返回的笔记 ID，已返回但有评论被跳过的文章不列入。commentsUnavailable 为该篇评论读取失败标记，不等于「没有评论」：该篇 returnedTopLevel=0 且不输出 cleaningStats，commentsUnavailableArticleIds 汇总失败篇目；此时应说明评论读取失败并用更小的 articleIds 重试，不得表述为「没有评论」。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论跳过/截断，truncated=true 时应用更小范围重读。AI 接管为会员专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -390,8 +390,8 @@
                     "commentLimit": {
                         "type": "integer",
                         "minimum": -1,
-                        "maximum": 1000,
-                        "description": "-1=全部有效顶层评论；0=不要评论；1-1000=每篇目标返回的有效顶层评论数（无效评论不占名额，按 commentSort 向后补位）；默认 -1"
+                        "maximum": 2000,
+                        "description": "-1=全部有效顶层评论；0=不要评论；1-2000=每篇目标返回的有效顶层评论数（无效评论不占名额，按 commentSort 向后补位）；默认 -1"
                     },
                     "commentSort": {
                         "type": "string",
@@ -432,7 +432,7 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试。【失败后的重试】先分清「暂停」与「失败」：抓取窗口被最小化/不可见时任务处于 `stalled_by_background`（同一任务，**调 `xhs_activate_window` 抢回窗口前台/请用户点任务栏窗口让它恢复可见即自动继续**；只有 10 分钟内一直未恢复可见才由插件兜底转终态），**不要**因此新开任务。终态失败（`TASK_INTERRUPTED`／`BLOCKED_BY_RISK`）不存在续跑：读快照 processed.articles 与 remaining（= max(0, targetArticles − 已抓篇数)，manual 任务同口径），remaining=0 则告知用户已完成、不重开（targetArticles 为 null 时属目标未知，不要断定已完成）；remaining>0 则征得用户同意后用**原参数新开任务**——同 keyword/noteUrl 与 datasetName，articleLimit=remaining，skipExistingArticles=true（不重复入库），其余 config 沿用；同一任务因基础设施中断最多建议重试一次。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持 AI 干预**：失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试。【失败后的重试】先分清「暂停」与「失败」：抓取窗口被最小化/不可见时任务处于 `stalled_by_background`（同一任务，**调 `xhs_activate_window` 抢回窗口前台/请用户点任务栏窗口让它恢复可见即自动继续**；只有 10 分钟内一直未恢复可见才由插件兜底转终态），**不要**因此新开任务。终态失败（`TASK_INTERRUPTED`／`BLOCKED_BY_RISK`）不存在续跑：读快照 processed.articles 与 remaining（= max(0, targetArticles − 已抓篇数)，manual 任务同口径），remaining=0 则告知用户已完成、不重开（targetArticles 为 null 时属目标未知，不要断定已完成）；remaining>0 则征得用户同意后用**原参数新开任务**——同 keyword/noteUrl 与 datasetName，articleLimit=remaining，skipExistingArticles=true（不重复入库），其余 config 沿用；同一任务因基础设施中断最多建议重试一次。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限 1-2000，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持 AI 干预**：失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -464,8 +464,8 @@
                             "commentLimit": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "maximum": 1000,
-                                "description": "每篇笔记评论数上限（默认 100）"
+                                "maximum": 2000,
+                                "description": "每篇笔记评论数上限（1-2000，默认 100）"
                             },
                             "crawlMode": {
                                 "type": "string",

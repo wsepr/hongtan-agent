@@ -41,7 +41,7 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
      - `skipExistingArticles`：跳过数据集中已存在的笔记，**默认 true**——增量/补抓场景保持默认；用户明确要全量重抓（更新已有笔记）时传 false；
      - `autoExpandCommentReplies`：自动展开评论中的回复内容，**默认 false**——用户要求抓完整回复楼/楼中楼时传 true；
      - `commentExpandLimit`：每条评论最多展开次数（0-999，0=不限），仅当 `autoExpandCommentReplies=true` 时生效；
-     - 另有 `commentLimit`（每篇评论上限，默认 100）、`crawlMode`（默认 smart）、`crawlCommentImages`（VIP 专属，默认 false）。
+     - 另有 `commentLimit`（每篇评论上限 1-2000，默认 100）、`crawlMode`（默认 smart）、`crawlCommentImages`（VIP 专属，默认 false）。
    - 速度因子等风控敏感参数不暴露（见 §8），不要索要或猜测。
 5. **汇报 task handle**，转入监控。
 
@@ -293,7 +293,7 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
 
 ## 9. 版本对齐
 
-本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 12`、`protocolVersion: 2`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
+本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 13`、`protocolVersion: 2`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
 
 ## 10. 数据读取与分析
 
