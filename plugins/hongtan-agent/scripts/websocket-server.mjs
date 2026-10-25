@@ -15,6 +15,10 @@ import http from "node:http";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_CLIENT_FRAME_BYTES = 1024 * 1024;
+/** 分片消息重组上限：应用层分块每块远小于此，仅防止恶意/异常客户端无限拼接 */
+const MAX_CLIENT_MESSAGE_BYTES = 4 * 1024 * 1024;
+/** 单条消息的分片数上限：零长度续帧不增加字节，必须单独限制数量 */
+const MAX_CLIENT_FRAGMENTS = 256;
 const MAX_HTTP_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_MESSAGES_PER_MINUTE = 180;
 
@@ -74,10 +78,33 @@ function createSocketPeer(socket, handlers = {}) {
         },
     };
 
+    /** 一条完整文本消息（可能是单帧，也可能是 continuation 重组后的结果） */
+    function handleTextMessage(payload) {
+        const currentTime = now();
+        while (messageTimes.length && messageTimes[0] <= currentTime - 60_000) {
+            messageTimes.shift();
+        }
+        if (messageTimes.length >= MAX_MESSAGES_PER_MINUTE) {
+            peer.close(1008, "Message rate limit exceeded");
+            return;
+        }
+        messageTimes.push(currentTime);
+
+        try {
+            handlers.onMessage?.(JSON.parse(payload.toString("utf8")), peer);
+        } catch (error) {
+            handlers.onMalformedMessage?.(error, peer);
+        }
+    }
+
+    let fragmentedParts = null;
+    let fragmentedBytes = 0;
+
     function consumeFrames() {
         while (buffer.length >= 2) {
             const first = buffer[0];
             const second = buffer[1];
+            const fin = Boolean(first & 0x80);
             const opcode = first & 0x0f;
             const masked = Boolean(second & 0x80);
             let length = second & 0x7f;
@@ -123,23 +150,57 @@ function createSocketPeer(socket, handlers = {}) {
                 sendRaw(payload, 0x0a);
                 continue;
             }
-            if (opcode !== 0x1) continue;
+            if (opcode === 0xa) continue;
 
-            const currentTime = now();
-            while (messageTimes.length && messageTimes[0] <= currentTime - 60_000) {
-                messageTimes.shift();
+            if (opcode === 0x1) {
+                if (fragmentedParts) {
+                    peer.close(1002, "New data frame during fragmentation");
+                    return;
+                }
+                if (!fin) {
+                    if (payload.length === 0) {
+                        peer.close(1009, "Empty first fragment");
+                        return;
+                    }
+                    fragmentedParts = [payload];
+                    fragmentedBytes = payload.length;
+                    continue;
+                }
+                handleTextMessage(payload);
+                continue;
             }
-            if (messageTimes.length >= MAX_MESSAGES_PER_MINUTE) {
-                peer.close(1008, "Message rate limit exceeded");
-                return;
-            }
-            messageTimes.push(currentTime);
 
-            try {
-                handlers.onMessage?.(JSON.parse(payload.toString("utf8")), peer);
-            } catch (error) {
-                handlers.onMalformedMessage?.(error, peer);
+            if (opcode === 0x0) {
+                if (!fragmentedParts) {
+                    peer.close(1002, "Unexpected continuation frame");
+                    return;
+                }
+                if (payload.length === 0 && !fin) {
+                    peer.close(1009, "Empty continuation frame");
+                    return;
+                }
+                if (fragmentedParts.length >= MAX_CLIENT_FRAGMENTS) {
+                    peer.close(1009, "Too many continuation frames");
+                    return;
+                }
+                fragmentedParts.push(payload);
+                fragmentedBytes += payload.length;
+                if (fragmentedBytes > MAX_CLIENT_MESSAGE_BYTES) {
+                    peer.close(1009, "Fragmented message too large");
+                    return;
+                }
+                if (fin) {
+                    const full = Buffer.concat(fragmentedParts);
+                    fragmentedParts = null;
+                    fragmentedBytes = 0;
+                    handleTextMessage(full);
+                }
+                continue;
             }
+
+            // 二进制/保留 opcode：本通道只接受文本 JSON
+            peer.close(1003, "Unsupported opcode");
+            return;
         }
     }
 

@@ -162,8 +162,38 @@ export function createBroker({
     /** 最近一次 hello 的 extId（离线时仍用于快照归属判定与 lastKnown/lastSeenAt 透出）。
      *  初值取自固化配置：Broker 重启后内存丢失，但快照不失效（§5.3），须能按同一 extId 命中。 */
     let lastExtensionExtId = browserManager.getStatus().config?.extId ?? null;
-    /** @type {Map<string, {resolve: (r: any) => void, timer: any}>} */
+    /** @type {Map<string, {resolve: (r: any) => void, timer: any, timeoutMs: number, timeoutCode: string, absoluteDeadline: number}>} */
     const syncPending = new Map();
+    /** 应用层分块重组：requestId → 分块 Buffer。单次响应上限 4MB（解码后字节）。 */
+    const SYNC_CHUNK_MAX_BYTES = 4 * 1024 * 1024;
+    /** 分块数上限：4MB / 512KB = 8，留足重试余量；防止 total 被放大后分配巨型数组 */
+    const MAX_SYNC_CHUNKS = 64;
+    /** @type {Map<string, {chunks: Buffer[], total: number, bytes: number}>} */
+    const syncChunkBuffers = new Map();
+
+    function finishSync(requestId, result) {
+        const pending = syncPending.get(requestId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        syncPending.delete(requestId);
+        syncChunkBuffers.delete(requestId);
+        pending.resolve(result);
+    }
+
+    /** 读类大响应会分块到达；每块都算进展，重置计时避免“有数据仍在传”被判超时。
+     *  同时保留 absoluteDeadline，防止慢速分块把一次读取拖成无限长。 */
+    function armSyncTimeout(requestId, pending) {
+        clearTimeout(pending.timer);
+        const remaining = Math.max(0, pending.absoluteDeadline - now());
+        pending.timer = setTimeout(() => {
+            syncPending.delete(requestId);
+            syncChunkBuffers.delete(requestId);
+            pending.resolve({
+                ok: false,
+                error: { code: pending.timeoutCode, message: "扩展响应超时（连接可能不稳定）" },
+            });
+        }, Math.min(pending.timeoutMs, remaining));
+    }
 
     function sendToExtension(payload) {
         const peer = extensionSession?.peer;
@@ -209,6 +239,8 @@ export function createBroker({
                     lastSeenAt: extensionLastSeenAt || null,
                     extId: extensionSession.extId,
                     version: extensionSession.version,
+                    toolsVersion: extensionSession.toolsVersion ?? null,
+                    capabilities: extensionSession.capabilities ?? null,
                     browserFamily: extensionSession.browserFamily,
                     agentEnabled: extensionSession.agentEnabled,
                     deviceApproved: extensionSession.deviceApproved,
@@ -246,8 +278,8 @@ export function createBroker({
         sendTaskCancel: (taskId) => sendToExtension({ type: "task.cancel", taskId }),
         // sync 写穿（详细设计 §2.5/§5.2）：数据集成功后覆盖快照 datasets 段（create/rename 再 fire-and-forget
         // 拉一次 list，保证快照与插件权威一致）；会员态（get_vip_state）成功后覆盖内存会话与快照 session 段
-        syncRequest: async (action, params, timeoutMs) => {
-            const result = await rawSyncRequest(action, params, timeoutMs);
+        syncRequest: async (action, params, timeoutMs, options = {}) => {
+            const result = await rawSyncRequest(action, params, timeoutMs, options);
             if (result?.ok) {
                 if (action === "list_datasets") {
                     snapshotStore.writeDatasets(result.data?.datasets ?? []);
@@ -275,7 +307,7 @@ export function createBroker({
     };
 
     /** 底层 sync.request 透传（不含写穿与副作用），供 syncRequest 包装复用 */
-    function rawSyncRequest(action, params, timeoutMs) {
+    function rawSyncRequest(action, params, timeoutMs, { timeoutCode = "EXTENSION_OFFLINE" } = {}) {
         return new Promise((resolve) => {
             const requestId = crypto.randomUUID();
             const sent = sendToExtension({ type: "sync.request", requestId, action, params });
@@ -283,14 +315,16 @@ export function createBroker({
                 resolve({ ok: false, error: { code: "EXTENSION_OFFLINE", message: "红探扩展未连接" } });
                 return;
             }
-            const timer = setTimeout(() => {
-                syncPending.delete(requestId);
-                resolve({
-                    ok: false,
-                    error: { code: "EXTENSION_OFFLINE", message: "扩展响应超时（连接可能不稳定）" },
-                });
-            }, timeoutMs);
-            syncPending.set(requestId, { resolve, timer });
+            const pending = {
+                resolve,
+                timer: null,
+                timeoutMs,
+                timeoutCode,
+                // 允许分块进展续期，但总时长最多 2 倍超时，避免慢速分块无限占用
+                absoluteDeadline: now() + timeoutMs * 2,
+            };
+            syncPending.set(requestId, pending);
+            armSyncTimeout(requestId, pending);
         });
     }
 
@@ -627,15 +661,85 @@ export function createBroker({
                 break;
             }
             case "sync.response": {
+                finishSync(
+                    msg.requestId,
+                    msg.ok
+                        ? { ok: true, data: msg.data }
+                        : { ok: false, error: msg.error ?? { code: "SYNC_FAILED", message: "同步操作失败" } }
+                );
+                break;
+            }
+            case "sync.chunk": {
                 const pending = syncPending.get(msg.requestId);
-                if (pending) {
-                    clearTimeout(pending.timer);
-                    syncPending.delete(msg.requestId);
-                    pending.resolve(
-                        msg.ok
-                            ? { ok: true, data: msg.data }
-                            : { ok: false, error: msg.error ?? { code: "SYNC_FAILED", message: "同步操作失败" } }
+                if (!pending) break;
+                if (
+                    !Number.isInteger(msg.seq) ||
+                    !Number.isInteger(msg.total) ||
+                    msg.total < 1 ||
+                    msg.seq < 1 ||
+                    msg.seq > msg.total ||
+                    typeof msg.data !== "string"
+                ) {
+                    finishSync(msg.requestId, {
+                        ok: false,
+                        error: { code: "BROKER_ERROR", message: "sync.chunk 字段非法" },
+                    });
+                    break;
+                }
+                if (msg.total > MAX_SYNC_CHUNKS) {
+                    finishSync(msg.requestId, {
+                        ok: false,
+                        error: { code: "BROKER_ERROR", message: "sync 分块数超过上限" },
+                    });
+                    break;
+                }
+                let buffer = syncChunkBuffers.get(msg.requestId);
+                if (buffer && buffer.total !== msg.total) {
+                    finishSync(msg.requestId, {
+                        ok: false,
+                        error: { code: "BROKER_ERROR", message: "sync.chunk 分块总数不一致" },
+                    });
+                    break;
+                }
+                if (!buffer) {
+                    buffer = { chunks: new Array(msg.total), total: msg.total, bytes: 0 };
+                    syncChunkBuffers.set(msg.requestId, buffer);
+                }
+                const chunk = Buffer.from(msg.data, "base64");
+                buffer.bytes += chunk.length;
+                if (buffer.bytes > SYNC_CHUNK_MAX_BYTES) {
+                    finishSync(msg.requestId, {
+                        ok: false,
+                        error: { code: "BROKER_ERROR", message: "响应超过传输上限（4MB），请缩小 articleIds/commentLimit" },
+                    });
+                    break;
+                }
+                buffer.chunks[msg.seq - 1] = chunk;
+                armSyncTimeout(msg.requestId, pending);
+                break;
+            }
+            case "sync.end": {
+                const buffer = syncChunkBuffers.get(msg.requestId);
+                if (!buffer || buffer.total !== msg.total || buffer.chunks.some((chunk) => !chunk)) {
+                    finishSync(msg.requestId, {
+                        ok: false,
+                        error: { code: "BROKER_ERROR", message: "sync 分块不完整或顺序不一致" },
+                    });
+                    break;
+                }
+                try {
+                    const payload = JSON.parse(Buffer.concat(buffer.chunks).toString("utf8"));
+                    finishSync(
+                        msg.requestId,
+                        payload?.ok
+                            ? { ok: true, data: payload.data }
+                            : { ok: false, error: payload?.error ?? { code: "SYNC_FAILED", message: "同步操作失败" } }
                     );
+                } catch {
+                    finishSync(msg.requestId, {
+                        ok: false,
+                        error: { code: "BROKER_ERROR", message: "sync 分块重组后不是合法 JSON" },
+                    });
                 }
                 break;
             }
@@ -747,6 +851,15 @@ export function createBroker({
             peer,
             extId: msg.extId ?? null,
             version: msg.version ?? null,
+            toolsVersion: Number.isInteger(msg.toolsVersion) ? msg.toolsVersion : null,
+            capabilities:
+                msg.capabilities && typeof msg.capabilities === "object"
+                    ? {
+                          readDatasetMode: msg.capabilities.readDatasetMode === true,
+                          readCrossDatasetIds: msg.capabilities.readCrossDatasetIds === true,
+                          readFileOutput: msg.capabilities.readFileOutput === true,
+                      }
+                    : null,
             browserFamily: msg.browserFamily ?? "unknown",
             agentEnabled: msg.agentEnabled === true,
             deviceApproved: msg.deviceApproved === true,
@@ -1049,6 +1162,7 @@ export function createBroker({
                     audit.append("ws_close", {});
                     if (extensionSession?.peer === peer) {
                         extensionSession = null;
+                        syncChunkBuffers.clear();
                         audit.append("extension_disconnected", {});
                         alerts.noteExtensionDisconnected();
                     }

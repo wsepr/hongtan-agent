@@ -207,7 +207,9 @@ function writeMessage(msg) {
  */
 
 function resultText(payload, isError = false) {
-    const result = { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+    // 成功响应紧凑序列化（大读取响应字符开销更小）；错误保留缩进方便人读
+    const text = isError ? JSON.stringify(payload, null, 2) : JSON.stringify(payload);
+    const result = { content: [{ type: "text", text }] };
     if (isError) result.isError = true;
     return result;
 }

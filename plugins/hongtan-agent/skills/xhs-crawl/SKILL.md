@@ -185,9 +185,10 @@ description: 当用户的请求实质涉及「采集/抓取小红书评论」「
 | `QUOTA_EXCEEDED` | 说明配额冷却中（按上次任务请求量折算，见 §2.7），消息里会给可重试时刻；**不要连续试跑、不要换参数/数据集重试**，到时间再按用户要求启动 |
 | `TASK_INTERRUPTED` | **终态**中断（`error.reason` 给出结构化归因；`stalled_timeout`＝窗口最小化/遮挡后 10 分钟内始终未被恢复可见、由插件兜底收尾——根因仍是暂停，只是错过了恢复窗口期），按 §2.6 标准重试流程处理：读 `remaining`，为 0 告知已完成不重开，>0 征得同意后原参数新开任务；同一任务最多建议重试一次。**若任务仍在暂停中（`stalled_by_background`）不要重开：先调 `xhs_activate_window` 抢回窗口前台（或请用户点任务栏闪烁的窗口），恢复可见即自动继续**，不属于本码 |
 | `RATE_LIMITED` | 说明操作过频，稍后重试 |
+| `READ_TIMEOUT` | 读超时，结果可能未完整返回。不要原样重试：缩小 `articleIds`、降低 `commentLimit`/`maxArticles` 后重试一次；数据集模式先减小 `maxArticles` |
 | `TASK_NOT_FOUND` | 核对 `taskId` 是否来自 `xhs_start_crawl` 的返回；任务超过 24 小时会被账本清理 |
 | `DATASET_NOT_FOUND` | 数据集不存在。先用 `xhs_list_datasets` 核对名称或 ID，不要原样重试；重名/改名后按名字无法定位时改用 `datasetId` |
-| `INVALID_ARGS` | 按工具 `inputSchema` 修正参数后重试（特别注意 `articleLimit` 必填、1-500；数据集选择器 `datasetId`/`datasetName` 必须二选一） |
+| `INVALID_ARGS` | 按工具 `inputSchema` 修正参数后重试（特别注意 `articleLimit` 必填、1-500；`datasetId`/`datasetName` 二选一；read 的 `articleIds` 1-100，且不能与 dataset 选择器/cursor/maxArticles 同时出现；数据集模式不能传 `commentLimit=-1`；ID 模式超过 10 个不能传 `-1`/`replyLimit=0`；`cursor` 要与读取参数一致） |
 | `UNKNOWN_TOOL` | 说明工具集可能需升级运行时；用 `xhs_connection_status` 查看当前可用能力 |
 | `BROKER_NO_RESPONSE` | 请求已送达但结果未知——**先调 `xhs_task_status` 确认是否已生效，禁止直接重发等待/启动/取消类调用**。读类调用若确需继续，可用更小范围（更少 `articleIds`、更小 `pageSize`/`commentLimit`）重试一次 |
 | `RUNTIME_STALE` | 运行进程旧于当前契约——按消息里的 pid 结束该进程，下一次工具调用会自动重拉新版本；不要反复重试 |
@@ -293,7 +294,7 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
 
 ## 9. 版本对齐
 
-本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 13`、`protocolVersion: 2`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。
+本 Skill 与 `contracts/xhs-agent-tools-v1.json` 同级管理，版本号与 `toolsVersion` 联动（当前 `toolsVersion: 14`、`protocolVersion: 2`）。工具响应中的快照字段为 `null` 时表示**运行中的插件/服务版本较旧、尚无该字段**，不代表对应能力或窗口不存在——按旧运行时处置，不要把 null 解读成异常。读取能力以 `xhs_connection_status.extension.capabilities` 为准（`readDatasetMode` / `readCrossDatasetIds` / `readFileOutput`）；字段缺失即视为旧插件，提示更新插件/本机服务，不回退旧读取形态。
 
 ## 10. 数据读取与分析
 
@@ -303,17 +304,60 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
 
 ```
 分析请求 → 数据集定位（xhs_list_datasets；离线时快照仅供用户看与选）
+  → xhs_connection_status（读 extension.capabilities；缺能力提示更新插件）
   → xhs_dataset_overview（全局认识；标签分布决定是否按标签切片）
-  → 用户指定笔记？→ 直接 read
-    否则 → xhs_list_articles 选取（按场景选 sort：热榜 likeCount / 时间线 scrapedTime / 标签切片 tagNames）
-  → xhs_read_articles（每批 ≤5 篇）
+  → 用户指定笔记？→ ID 模式 read（仅 articleIds，可跨数据集）
+    否则 → 数据集模式 read（仅 datasetId/datasetName + nextCursor 续读）
   → 输出分析结论
 ```
+
+### 10.1 读取模式与规模
+
+| 条件 | 模式 | 默认参数 |
+|---|---|---|
+| 用户指定笔记，或 `articleCount ≤ 20` 且 `scrapedCommentCount ≤ 1000` | 一次 ID / 数据集 inline | `commentLimit=100`（要尽量全量时显式 2000，仍可能截断）、`replyLimit=20` |
+| 其他情况 | 数据集模式 + 续读 | `maxArticles=50`、`commentLimit=100`、`replyLimit=20`，循环到 `nextCursor=null` |
+
+- **数据集模式**：只传 `datasetId`/`datasetName`，按 `scrapedTime` 倒序、`articleId` 升序返回；`maxArticles` 默认 50（1–100）。
+- **ID 模式**：只传 `articleIds`（1–100，可跨数据集）；不要再传 `datasetId`/`datasetName`、`maxArticles`/`cursor`。
+- **游标**：`cursor` 只能用于数据集模式，来自上次 `nextCursor`；绑定数据集与读取参数，翻页中途改 `commentLimit` / `commentSort` / `includeReplies` / `replyLimit` 会被拒绝。
+- **`commentLimit`**：两种模式默认 100；数据集模式显式 `-1` → `INVALID_ARGS`；ID 模式超过 10 个 ID 时显式 `-1` → `INVALID_ARGS`。要尽量全量时传 2000，超过 2000 条的笔记仍会截断。
+- **`replyLimit`**：默认 20；ID 模式超过 10 个 ID 时显式 `0` 且 `includeReplies=true` → `INVALID_ARGS`。≤10 个 ID 时可显式传 0 表示不限回复。
+- **批量守卫**：ID 模式超过 10 个时，默认 100/20 是安全值；显式 `commentLimit=-1` 或 `replyLimit=0` 会被拒绝。数据集模式不受此守卫影响（它有自己的默认值）。
+- **成本**：`commentLimit` / `replyLimit` 只限制输出，不减少读取、清洗、排序成本；病态大数据集不要靠调小它们“提速”。
+- **稳定快照**：需要稳定枚举时先用 `xhs_list_articles(pageSize=1000)` 冻结 ID（超过 1000 篇按 `hasMore` 翻页），但 list 也是时点快照，只能降低漂移。
+
+### 10.2 覆盖度声明
+
+只有以下条件全部满足，才能说“读完了全部评论”：
+
+- `nextCursor=null`；
+- `truncatedArticleIds=[]`、`missingArticleIds=[]`；
+- `commentsTruncated=false`（且逐篇 `commentsTruncated=false`）；
+- `commentsUnavailableArticleIds=[]`；
+- `commentLimit` 为 `-1` 或 2000，且没有笔记的顶层评论数超过该值。
+
+否则必须说“覆盖了 N 篇、返回了 M 条评论”，不能把“返回数量”说成“全部”。数据集模式下 `nextCursor` 非空时继续用 cursor，不要按 `truncatedArticleIds` 重读；ID 模式才用 `truncatedArticleIds` 判断是否缩小 `articleIds`。
+
+### 10.3 两遍法（可选，明确是抽样）
+
+1. 第一遍：`commentLimit=0` 读正文（按 `maxArticles` 分批），建立主题/结构认识；
+2. 第二遍：按 `xhs_dataset_overview` 的 Top5 或 `xhs_list_articles(sort=likeCount/commentCount)` 选 10–20 篇读评论；
+3. 告诉用户“第二遍是热度抽样，不代表全部评论”；
+4. 需要全量统计时走后续聚合能力或更多分批，不要把抽样说成全量。
+
+### 10.4 旧运行时
+
+AI 接管尚未上线，不做旧读取形态兼容。先看 `xhs_connection_status.extension.capabilities`：
+
+- `readDatasetMode=false` 或字段缺失 → 说明当前插件/本机服务版本不支持新读取接口，提示用户更新后重试；不要回退到“数据集 + articleIds”的老调用。
+- `readCrossDatasetIds=false` → 同上，提示更新；不要按数据集拆批伪装成支持。
+- 不要用 `INVALID_ARGS` 判断版本。
 
 **关键纪律**：
 
 1. **漏斗优先**：禁止跳过 overview/list 对大数据集盲读；「分析整个数据集」＝ overview 结论 + 代表性笔记抽样（热门榜优先），不是全量读取。
-2. **规模自律**：读取前看 list 行的 `scrapedComments`（含回复的总数）预判，但要知道 read 的 `commentLimit` 按**顶层评论**计，两者不是同一口径；而且只统计**最终有效**的顶层评论——被清洗消除的评论不占名额，会按 `commentSort` 向后补位，所以返回集合可能包含原本第 N 名之后的评论。评论 >500 时先与用户确认口径（全量 / 热评取样）；`commentLimit=-1` 视为「全量、可能很大」。收到 `truncated=true` 时先看数量：`commentLimit` 有限且 `returnedTopLevel` 未达目标 → 降 `articleIds`/`commentLimit` 重读；`commentLimit=-1` → 降 `articleIds` 重读；已达目标但仍为 `true` → 说明有大评论被跳过或回复被截断，需要完整热评时单独降低 `replyLimit` 重读该篇，不硬塞。
+2. **规模自律**：读取前先按 §10.1 选模式；`scrapedComments` 含回复，`commentLimit` 只按**顶层评论**计，两者不是同一口径；只统计**最终有效**的顶层评论，被清洗消除的评论不占名额、会按 `commentSort` 向后补位。评论 >500 时先与用户确认口径（全量 / 热评取样）。收到 `truncated=true` 时：数据集模式看 `returnedArticles` 与 `nextCursor`（继续用 cursor，不按 ID 重读）；ID 模式看 `returnedTopLevel` 与目标，未达目标降 `articleIds`/`commentLimit`，已达目标但仍有大评论被跳过或回复被截断时，降 `replyLimit` 重读该篇，不硬塞。
 3. **限流纪律**：连续读取注意操作频控（`RATE_LIMITED`），失败后 ≥10 秒再试，不紧密重试。
 4. **口径与清洗转译**（字段名不上屏）：
    - 双口径：「这篇笔记显示 210 条评论，实际抓取了 180 条」（实际抓取数含回复）；overview 的 `interactions.totalComments` 是页面显示总数，`dataset.scrapedCommentCount` 是已抓数。
@@ -321,8 +365,11 @@ MCP 工具返回的是给**你的判断依据**，不是给用户看的内容。
    - 不再输出「未配置清洗规则，数据可能含表情、水评」——规则 1-4 对 AI 读取恒开，这条文案不再成立。
    - `activeCrawl=true`：「该数据集仍在抓取中，以下数据是当前时点的快照」；overview/list/read 都可能返回该标志，手工任务同样适用。
    - 标签：`tagNamesNotFound` 非空时如实说明哪些标签不存在，不要把空结果当成数据集没有内容。
-   - 分页：只看 `total` / `hasMore`，不要靠空页猜结束。
-   - 缺失文章：如实说明哪些 ID 不存在或不属于该数据集；`truncatedArticleIds` 只表示**因预算不足整篇未返回**，和缺失不同——已返回但其中评论被跳过的文章不会列入。
+   - 分页：read 数据集模式看 `totalArticles` / `returnedArticles` / `nextCursor`；list 看 `total` / `hasMore`，不要靠空页猜结束。
+   - 统计口径：`cleaning.statsScope="returned"` 表示 `cleaning.stats` 只聚合本页返回篇目，不是数据集全量。
+   - 缺失文章：ID 模式表示内部 id 不存在；数据集模式表示扫描后读取缺失的竞态。`truncatedArticleIds` 在 ID 模式表示因预算未返回；在数据集模式只表示单篇过大被跳过、cursor 已越过，其余未返回篇目由 `nextCursor` 表达。
+   - ID 模式：`dataset=null`、`datasets` 非空、每篇带 `datasetId`；`articleIds` 是插件内部 id，不是小红书 note id，同一笔记跨数据集可能是两个不同 id。
+   - `commentsTruncated`（逐篇）表示该篇有评论因预算被跳过或回复被截断。
    - 读取失败：`commentsUnavailableArticleIds` 非空（或某篇 `commentsUnavailable=true`）时，不得说「这篇没有评论」，应说明「评论读取失败」，并建议用更小的 `articleIds` 重试；这类文章 `returnedTopLevel=0` 且没有 `cleaningStats`。
 5. **结论不贴数据**：读取是手段，给用户的是分析结论；禁止把渲染后的 markdown 原文大段回显（§6.5 反模式沿用）。
 6. **VIP_REQUIRED 与豁免**：除 `xhs_connection_status`、`xhs_prepare_env` 外，其余工具均可能返回 `VIP_REQUIRED`。如实说明「AI 接管为会员功能」并引导开通/登录，不重试；刚开通会员可先调 `xhs_connection_status` 刷新会员态后重试；浏览器未连接可先 `xhs_prepare_env` 唤醒。

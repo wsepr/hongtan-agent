@@ -184,14 +184,19 @@ export function createToolExecutor({
     // sync.request 透传（数据集类）
     // ------------------------------------------------------------------
 
-    async function syncRequest(action, params, timeoutMs = options.syncTimeoutMs) {
+    async function syncRequest(action, params, timeoutMs = options.syncTimeoutMs, requestOptions = {}) {
         if (!session.isConnected()) {
             return err("EXTENSION_OFFLINE", "红探扩展未连接（休眠或未开启 AI 接管），稍后可恢复");
         }
-        return session.syncRequest(action, params, timeoutMs);
+        return session.syncRequest(action, params, timeoutMs, requestOptions);
     }
 
-    function syncTimeoutFor(tool) {
+    function syncTimeoutFor(tool, args = {}) {
+        // 数据集模式与大批量 ID 读取一次装多篇，给 40s；小批定向读取保持 30s
+        if (tool === "xhs_read_articles") {
+            if (args?.articleIds === undefined) return 40_000;
+            if (Array.isArray(args.articleIds) && args.articleIds.length > 20) return 40_000;
+        }
         return TOOL_SYNC_TIMEOUTS[tool] ?? options.syncTimeoutMs;
     }
 
@@ -294,6 +299,8 @@ export function createToolExecutor({
                 lastSeenAt: info?.lastSeenAt ?? null,
                 extId: info?.extId ?? null,
                 version: info?.version ?? null,
+                toolsVersion: info?.toolsVersion ?? null,
+                capabilities: info?.capabilities ?? null,
                 browserFamily: info?.browserFamily ?? null,
                 agentEnabled: info?.agentEnabled ?? null,
                 deviceApproved: info?.deviceApproved ?? null,
@@ -799,11 +806,15 @@ export function createToolExecutor({
                     newName: args?.newName,
                 });
             case "xhs_dataset_overview":
-                return syncRequest("dataset_overview", { ...args }, syncTimeoutFor(tool));
+                return syncRequest("dataset_overview", { ...args }, syncTimeoutFor(tool), { timeoutCode: "READ_TIMEOUT" });
             case "xhs_list_articles":
-                return syncRequest("list_articles", { ...args }, syncTimeoutFor(tool));
-            case "xhs_read_articles":
-                return syncRequest("read_articles", { ...args }, syncTimeoutFor(tool));
+                return syncRequest("list_articles", { ...args }, syncTimeoutFor(tool), { timeoutCode: "READ_TIMEOUT" });
+            case "xhs_read_articles": {
+                if (args?.articleIds !== undefined && (args?.datasetId !== undefined || args?.datasetName !== undefined)) {
+                    return err("INVALID_ARGS", "articleIds 与 datasetId/datasetName 不能同时使用；按 ID 读取会自动跨数据集");
+                }
+                return syncRequest("read_articles", { ...args }, syncTimeoutFor(tool, args), { timeoutCode: "READ_TIMEOUT" });
+            }
             case "xhs_task_status":
                 return toolTaskStatus(args);
             case "xhs_task_list":

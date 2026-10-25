@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 2,
-    "toolsVersion": 13,
+    "toolsVersion": 14,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -11,7 +11,9 @@
         "datasetNameMaxLength": 50,
         "waitHangSecMax": 30,
         "taskCountPer24h": 96,
-        "actionCallsPerMinute": 60
+        "actionCallsPerMinute": 60,
+        "readArticleIdsMax": 100,
+        "readMaxArticlesDefault": 50
     },
     "errorCodes": {
         "AGENT_DISABLED": {
@@ -153,13 +155,18 @@
             "message": "Broker 未运行且自动拉起失败",
             "aiGuidance": "提示用户手动启动红探本机服务（node scripts/broker-server.mjs）后再试；不要紧密重试。",
             "retryable": false
+        },
+        "READ_TIMEOUT": {
+            "message": "读取超时，结果可能未完整返回",
+            "aiGuidance": "不要原样重试。缩小 articleIds、降低 commentLimit/maxArticles 后重试一次；数据集模式可先用更小的 maxArticles。",
+            "retryable": true
         }
     },
     "tools": [
         {
             "name": "xhs_connection_status",
             "kind": "control",
-            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。离线（extension.connected=false）时另回 lastKnown（上次在线时的会话摘要：lastSeenAt/vip/quota/extId/browserFamily/cachedAt；超 24 小时或换浏览器/extId 不匹配时为 null——不得拿不确定的旧数据当决策依据）、canWake（是否可唤醒，true 表示可调 xhs_prepare_env 拉起浏览器）与 alerts（最近告警摘要，白名单字段只有 kind/at/taskId，仅覆盖当前 Broker 进程存活期；跨重启历史只能查 stateDir/audit.jsonl）。在线时 lastKnown 恒为 null——在线回答只来自活体查询。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。",
+            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。离线（extension.connected=false）时另回 lastKnown（上次在线时的会话摘要：lastSeenAt/vip/quota/extId/browserFamily/cachedAt；超 24 小时或换浏览器/extId 不匹配时为 null——不得拿不确定的旧数据当决策依据）、canWake（是否可唤醒，true 表示可调 xhs_prepare_env 拉起浏览器）与 alerts（最近告警摘要，白名单字段只有 kind/at/taskId，仅覆盖当前 Broker 进程存活期；跨重启历史只能查 stateDir/audit.jsonl）。在线时 lastKnown 恒为 null——在线回答只来自活体查询。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。 在线时 extension 段另含 toolsVersion（插件实际支持的契约工具版本）与 capabilities{readDatasetMode,readCrossDatasetIds,readFileOutput}；旧插件缺省表示能力未知/全部 false；此时提示用户更新插件/本机服务，不回退旧读取形态。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -363,20 +370,20 @@
         {
             "name": "xhs_read_articles",
             "kind": "sync",
-            "description": "深读指定笔记的正文与清洗后的评论（S3，执行分析）。datasetId 与 datasetName 必须二选一。articleIds 来自 xhs_list_articles/xhs_dataset_overview 返回的 id，每次 1-5 个、自动去重；必须属于目标数据集，不存在或跨数据集的 ID 在 missingArticleIds 回传（部分缺失仍成功；全部缺失返回空 articles + 完整缺失列表）。commentLimit 按顶层评论计：-1=全部有效顶层（默认，可能超过 2000）、0=不要评论、1-2000=每篇目标返回 N 条有效顶层评论（各篇独立计数，不跨笔记借用名额），被清洗消除的评论不占名额，按 commentSort 向后补位，有效评论不足或触发扫描上限时返回实际数量；commentSort=likes（默认，点赞倒序）/time（时间正序）；includeReplies 默认 true，false 时不返回回复，主评已被清洗为空且没有可返回回复的评论将不再出现；replyLimit=每条顶层评论最多带回复数（0=不限，默认 0；includeReplies=false 时忽略）。清洗恒生效且不可关闭：内置规则 1-4（表情与图片占位、@提及、特殊符号、无意义内容）强制开启，用户规则 5-6（字数、关键字）按用户设置。返回 JSON envelope：dataset、cleaning{builtin,userRules,scope:\"all\",stats}、逐篇 articles{id,title,author,publishTime,likeCount,commentCount,scrapedCommentCount,returnedTopLevel,returnedReplies,cleaningStats,contentTruncated,commentsOmitted,commentsUnavailable,body}（body 为渲染后的 markdown，按请求 articleIds 顺序；returnedTopLevel 是本次实际返回的有效顶层评论数，可能小于 commentLimit）、missingArticleIds、truncated/truncatedArticleIds、commentsUnavailableArticleIds。truncated=true 表示有评论因体积被截断/跳过、扫描达到上限，或该篇未返回（数量已满也可能为 true）；truncatedArticleIds 仅包含因预算不足而整篇未返回的笔记 ID，已返回但有评论被跳过的文章不列入。commentsUnavailable 为该篇评论读取失败标记，不等于「没有评论」：该篇 returnedTopLevel=0 且不输出 cleaningStats，commentsUnavailableArticleIds 汇总失败篇目；此时应说明评论读取失败并用更小的 articleIds 重试，不得表述为「没有评论」。正文超过 2000 字符截断；组装期超过响应体积预算时按完整顶层评论跳过/截断，truncated=true 时应用更小范围重读。AI 接管为会员专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
+            "description": "深读笔记正文与清洗后的评论（S3）。选择器二选一：① 仅 articleIds（1-100，可跨数据集；articleIds 是插件内部 id，来自 list/overview 返回的 id，不是小红书 note id）；② 仅 datasetId 或 datasetName（数据集模式，按 scrapedTime 倒序、articleId 升序批量读取，支持 maxArticles 与 cursor）。articleIds 与 datasetId/datasetName 不能同时出现；articleIds 也不能与 cursor/maxArticles 同时出现。maxArticles 仅数据集模式，1-100，默认 50；cursor 只能用于数据集模式，来自上次 nextCursor，绑定数据集与读取参数，翻页中途改 commentLimit/commentSort/includeReplies/replyLimit 会被拒绝。commentLimit：两种模式默认 100；数据集模式显式 -1 返回 INVALID_ARGS；ID 模式超过 10 个 ID 时显式 -1 也返回 INVALID_ARGS；0=不要评论；1-2000=每篇有效顶层数。replyLimit：默认 20；ID 模式超过 10 个 ID 时显式 0（且 includeReplies=true）返回 INVALID_ARGS。commentLimit 只限制输出渲染数量，不减少读取/清洗成本。响应 cleaning.statsScope=\"returned\"；articles[] 含 id/title/scrapedCommentCount/returnedTopLevel/returnedReplies/cleaningStats/contentTruncated/commentsTruncated/commentsOmitted（ID 模式另带 datasetId；此时顶层 dataset=null、datasets 列出实际返回文章涉及的数据集，activeCrawl=null）；顶层 totalArticles/returnedArticles/returnedArticleIds/missingArticleIds/truncated/truncatedArticleIds/commentsUnavailableArticleIds/nextCursor/effectiveCommentLimit/effectiveReplyLimit。普通翻页（仅 nextCursor 非空）不置 truncated；数据集模式 nextCursor 非空时继续用 cursor，不要按 truncatedArticleIds 重读；ID 模式 truncatedArticleIds 才表示需缩小 articleIds。missingArticleIds：ID 模式=不存在；数据集模式=扫描后读取缺失的竞态。commentsUnavailable 不等于没有评论。正文超过 2000 字符截断；组装期 800k 预算超限按评论边界截断。AI 接管为会员专属；读取恒为实时查询，离线时先调 xhs_prepare_env 唤醒。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "datasetId": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "数据集 ID（与 datasetName 二选一）"
+                        "description": "数据集 ID（数据集模式，与 datasetName 二选一；不能与 articleIds 同时使用）"
                     },
                     "datasetName": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 50,
-                        "description": "数据集名称（与 datasetId 二选一）"
+                        "description": "数据集名称（数据集模式，与 datasetId 二选一；不能与 articleIds 同时使用）"
                     },
                     "articleIds": {
                         "type": "array",
@@ -384,14 +391,14 @@
                             "type": "string"
                         },
                         "minItems": 1,
-                        "maxItems": 5,
-                        "description": "笔记 ID 列表（来自 list/overview 返回的 id），每次 1-5 篇"
+                        "maxItems": 100,
+                        "description": "笔记内部 id 列表（1-100，可跨数据集；不能与 datasetId/datasetName 同时使用），来自 list/overview 返回的 id，不是小红书 note id"
                     },
                     "commentLimit": {
                         "type": "integer",
                         "minimum": -1,
                         "maximum": 2000,
-                        "description": "-1=全部有效顶层评论；0=不要评论；1-2000=每篇目标返回的有效顶层评论数（无效评论不占名额，按 commentSort 向后补位）；默认 -1"
+                        "description": "每篇目标有效顶层评论数（1-2000；0=不要评论；默认 100）；数据集模式显式 -1 → INVALID_ARGS；ID 模式超过 10 个 ID 时显式 -1 → INVALID_ARGS"
                     },
                     "commentSort": {
                         "type": "string",
@@ -409,24 +416,19 @@
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 100,
-                        "description": "每条顶层评论最多带回复数；0=不限，默认 0"
-                    }
-                },
-                "required": [
-                    "articleIds"
-                ],
-                "oneOf": [
-                    {
-                        "required": [
-                            "datasetId"
-                        ]
+                        "description": "每条顶层评论最多带回复数（默认 20；0=不限）；ID 模式超过 10 个 ID 时显式 0 且 includeReplies=true → INVALID_ARGS"
                     },
-                    {
-                        "required": [
-                            "datasetName"
-                        ]
+                    "maxArticles": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "数据集模式单次最多返回篇数（默认 50）；与 articleIds 同时使用 → INVALID_ARGS"
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "数据集模式续读游标（来自上次响应的 nextCursor）；与 articleIds 同时使用或用于其他形态 → INVALID_ARGS"
                     }
-                ]
+                }
             }
         },
         {

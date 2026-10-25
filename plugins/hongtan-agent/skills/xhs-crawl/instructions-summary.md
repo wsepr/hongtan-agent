@@ -15,7 +15,7 @@
 
 7. **手动任务（`source:"manual"`）**：用户在插件里自己发起的抓取也会进任务账本，并**同样计入配额**（冷却债 / 24 小时内次数上限 / 风控加成），且与 AI 任务**共用全局单飞**（同一时刻只允许一个执行中任务）。因此：`xhs_task_list` 会看到 `source:"manual"` 的记录；被 `TASK_BUSY` 拒且来源是 manual 时如实说明"插件里有一个手动任务在跑（数据集「X」），请等它完成或在插件中结束"；**不得**用 `xhs_cancel_task` 取消手动任务（返回 `CANCEL_REJECTED`，"请在插件中取消"）；手动任务失败即由用户在插件中重跑。
 
-8. **数据读取与分析（漏斗优先）**：`xhs_dataset_overview`（数据集统计/时间范围/互动汇总/按赞与按评论的 Top5 摘要/标签分布/`activeCrawl`）→ `xhs_list_articles`（分页、排序、抓取时间与标签筛选；`pageSize>100` 自动精简；`total`/`hasMore`/`tagNamesNotFound`）→ `xhs_read_articles`（每批 ≤5 篇，按输入顺序返回）。`commentLimit` 为 `-1`（全部有效顶层，可能很大）/`0`（不要评论）/`1-2000`（**每篇**目标返回 N 条**有效**顶层评论，被清洗消除的不占名额、按 `commentSort` 向后补位），默认 -1；双口径：`comments`/`commentCount`=页面显示总数，`scrapedComments`/`scrapedCommentCount`=实际抓取数（含回复）。清洗内置规则 1-4 恒开、规则 5-6 按用户设置；`activeCrawl`/`tagNamesNotFound`/`missingArticleIds`/`truncated`/`truncatedArticleIds`/`commentsUnavailableArticleIds` 必须如实转述。`truncated=true` 不等于有文章缺失：`truncatedArticleIds` 只列因预算不足整篇未返回的文章（已返回但评论被跳过的不列入）；`commentLimit` 有限且 `returnedTopLevel` 未达目标时降 `articleIds`/`commentLimit` 重读，`commentLimit=-1` 时降 `articleIds` 重读，已达目标仍为 `true` 时降 `replyLimit` 重读该篇，不硬塞。`commentsUnavailableArticleIds` 非空表示评论读取失败（该篇 `returnedTopLevel=0` 且无 `cleaningStats`），不得说「没有评论」，应说明读取失败并用更小的 `articleIds` 重试。读取前看 `scrapedComments` 预判，评论 >500 先与用户确认口径。数据读取恒为 live，离线先 `xhs_prepare_env`；三个读取工具同样受 VIP 门禁。
+8. **数据读取与分析（漏斗优先）**：`xhs_dataset_overview` → `xhs_read_articles` 选择器二选一：① 仅 `articleIds`（1-100，可跨数据集；不能与 dataset 选择器同时传）；② 仅 `datasetId`/`datasetName`（数据集模式，`maxArticles` 默认 50、`commentLimit` 100、`replyLimit` 20，循环到 `nextCursor=null`）。`commentLimit` 两种模式默认 100；数据集模式显式 -1 → `INVALID_ARGS`；ID 模式超过 10 个 ID 时显式 -1 → `INVALID_ARGS`；`0`=不要评论；`1-2000`=每篇有效顶层数，被清洗消除的不占名额、按 `commentSort` 补位。`replyLimit` 默认 20；ID 模式超过 10 个时显式 0 且 `includeReplies=true` → `INVALID_ARGS`。`commentLimit` 只限制输出、不降读取成本。双口径与清洗规则不变；`statsScope="returned"`、`totalArticles`/`returnedArticles`/`returnedArticleIds`/`nextCursor`/`commentsTruncated` 必须如实转述。数据集模式 `nextCursor` 非空时继续用 cursor，不按 `truncatedArticleIds` 重读；ID 模式才用 `truncatedArticleIds` 缩小 `articleIds`。`missingArticleIds`：ID 模式=不存在；数据集模式=扫描后读取缺失的竞态。`commentsUnavailable` 不等于没有评论。只有 `nextCursor=null`、`truncatedArticleIds=[]`、`missingArticleIds=[]`、`commentsTruncated=false`、`commentsUnavailableArticleIds=[]`、`commentLimit=-1/2000` 且无笔记超过该值，才能说“读完全部评论”。读取前按 `extension.capabilities` 确认能力；缺失/false 时提示更新插件，不回退旧读取形态。读取恒为 live，离线先 `xhs_prepare_env`；三个读取工具同样受 VIP 门禁。
 
 错误码处理（详见 SKILL）：
 - `EXTENSION_OFFLINE`、`STALLED_BY_BACKGROUND`：不得重试，也不得宣告失败；分别说明「扩展暂时休眠，稍后恢复」「抓取窗口被最小化，任务已暂停，恢复窗口可见后自动继续」（被别的窗口盖住不会导致停摆）。不要要求用户保持前台；用户在场且希望立即恢复时，**先征询**再调 `xhs_activate_window`（前台化由本机服务用 OS 级方式执行，会抢焦点；`activated=false` 时按 `reason` 说明原因并请用户点击任务栏中闪烁的窗口，**不要反复重试**）。注意：**恢复窗口可见是唯一补救，必须在 10 分钟内做出**——暂停若 10 分钟内一直没被恢复可见，插件会兜底终态化为 `TASK_INTERRUPTED(stalled_timeout)`（根因仍是窗口最小化/遮挡，只是错过了恢复窗口期）。
@@ -34,7 +34,8 @@
 - `TAB_UNAVAILABLE`：抓取标签页已关闭或不可用，任务已终态失败（不自动恢复）；按 `TASK_INTERRUPTED` 的重试流程处理。
 - `CANCEL_TIMEOUT` / `CANCEL_REJECTED`：说明抓取可能仍在进行，稍后复查。
 - `RATE_LIMITED`：说明操作过频，稍后重试。
-- `INVALID_ARGS`：按 inputSchema 修正参数（注意 `articleLimit` 必填 1-500）。
+- `READ_TIMEOUT`：读超时不要原样重试；缩小 `articleIds`、降低 `commentLimit`/`maxArticles` 后重试一次。
+- `INVALID_ARGS`：按 inputSchema 修正参数（`articleLimit` 必填 1-500；read 的 `articleIds` 1-100；数据集模式不能 `commentLimit=-1`；`cursor` 只能配数据集模式且参数一致）。
 - `TASK_NOT_FOUND`：核对 taskId；任务超过 24 小时会被清理。
 - `DATASET_NOT_FOUND`：数据集不存在——先用 `xhs_list_datasets` 核对名称或 ID，不要原样重试；重名/改名后按名字无法定位时改用 `datasetId`。
 - `UNKNOWN_TOOL`：可能需升级运行时。
@@ -47,4 +48,4 @@
 
 不得绕过 VIP 限制；被钳制或降级的结果一律如实转述。`articleLimit` 是单次任务上限（1-500），数据集无数量上限、可被多次任务累加。
 
-版本：`protocolVersion: 2`、`toolsVersion: 13`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
+版本：`protocolVersion: 2`、`toolsVersion: 14`（与 `contracts/xhs-agent-tools-v1.json` 联动）。
