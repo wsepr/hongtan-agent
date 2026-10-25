@@ -59,7 +59,11 @@ export function normalizeLegacyTask(task) {
             message: "任务提前结束（历史记录）",
         };
     } else if (task.state === "interrupted") {
-        if (originalTarget > 0 && articles >= originalTarget) {
+        // 单篇/作者进度在评论抓取前上报，达标不等于评论完整；这两个目标不得按进度收敛。
+        // 与插件 taskCompletion.isNoteLikeProgressTarget 同义；跨运行时不能共享代码，测试保持对照。
+        const targetType = resolveTaskTarget(task)?.type ?? null;
+        const noteLike = targetType === "noteUrl" || targetType === "authorUrl";
+        if (!noteLike && originalTarget > 0 && articles >= originalTarget) {
             normalized.state = "completed";
         } else {
             normalized.state = "failed";
@@ -118,6 +122,13 @@ export function canBrokerTransition(from, to) {
 const PROGRESS_HISTORY_CAP = 500;
 /** progressSince 单次响应最多回传的条目数（控制 token；被截掉的计入 droppedCount） */
 const PROGRESS_RESPONSE_LIMIT = 40;
+
+/** 出站文本脱敏：把任意消息里 URL 的 xsec_token/xsec_source 值替换为 [redacted] */
+const SECRET_QUERY_VALUE_RE = /((?:xsec_token|xsec_source)=)[^&\s"'<>)]*/gi;
+
+export function redactSecretsInText(text) {
+    return text.replace(SECRET_QUERY_VALUE_RE, "$1[redacted]");
+}
 
 export function createTaskStore({
     ledgerPath,
@@ -192,8 +203,12 @@ export function createTaskStore({
     load();
 
     function setState(task, state, extra = {}) {
+        const safeExtra =
+            extra?.error && typeof extra.error.message === "string"
+                ? { ...extra, error: { ...extra.error, message: redactSecretsInText(extra.error.message) } }
+                : extra;
         if (task.state === state) {
-            Object.assign(task, extra, { updatedAt: now() });
+            Object.assign(task, safeExtra, { updatedAt: now() });
             persist();
             return true;
         }
@@ -203,7 +218,7 @@ export function createTaskStore({
         }
         task.state = state;
         task.stateChangedAt = now();
-        Object.assign(task, extra);
+        Object.assign(task, safeExtra);
         task.updatedAt = now();
         persist();
         emitChange(task.id);
@@ -360,20 +375,24 @@ export function createTaskStore({
             if (effectiveConfig && typeof effectiveConfig === "object" && !Array.isArray(effectiveConfig)) {
                 task.effectiveConfig = effectiveConfig;
             }
-            if (data) {
-                if (Number.isFinite(data.articles)) task.processed.articles = data.articles;
-                if (Number.isFinite(data.comments)) task.processed.comments = data.comments;
-                if (Number.isFinite(data.images)) task.processed.images = data.images;
-                if (Number.isFinite(data.skippedByBlacklist)) task.processed.skippedByBlacklist = data.skippedByBlacklist;
-                if (Number.isFinite(data.skippedExisting)) task.processed.skippedExisting = data.skippedExisting;
+            const safeData =
+                data && typeof data.message === "string"
+                    ? { ...data, message: redactSecretsInText(data.message) }
+                    : data;
+            if (safeData) {
+                if (Number.isFinite(safeData.articles)) task.processed.articles = safeData.articles;
+                if (Number.isFinite(safeData.comments)) task.processed.comments = safeData.comments;
+                if (Number.isFinite(safeData.images)) task.processed.images = safeData.images;
+                if (Number.isFinite(safeData.skippedByBlacklist)) task.processed.skippedByBlacklist = safeData.skippedByBlacklist;
+                if (Number.isFinite(safeData.skippedExisting)) task.processed.skippedExisting = safeData.skippedExisting;
                 // 目标总篇数与篇目序号：插件侧 total 是钳制后的真实目标，比 AI 请求值更权威
                 // （0 视为尚未得知，不能把已知目标清掉）
-                if (Number.isFinite(data.total) && data.total > 0) task.targetArticles = data.total;
-                if (Number.isFinite(data.current)) task.currentArticle = data.current;
-                if (typeof data.visibility === "string") task.visibility = data.visibility;
-                if (typeof data.message === "string") task.lastMessage = data.message;
+                if (Number.isFinite(safeData.total) && safeData.total > 0) task.targetArticles = safeData.total;
+                if (Number.isFinite(safeData.current)) task.currentArticle = safeData.current;
+                if (typeof safeData.visibility === "string") task.visibility = safeData.visibility;
+                if (typeof safeData.message === "string") task.lastMessage = safeData.message;
             }
-            task.progressHistory.push({ seq, at: now(), data: data ?? null });
+            task.progressHistory.push({ seq, at: now(), data: safeData ?? null });
             if (task.progressHistory.length > PROGRESS_HISTORY_CAP) {
                 const overflow = task.progressHistory.length - PROGRESS_HISTORY_CAP;
                 task.progressHistory.splice(0, overflow);
@@ -402,9 +421,9 @@ export function createTaskStore({
                 kind: task.kind,
                 /** 任务来源（详细设计 §2.3）：旧落盘记录缺字段时按 agent 兜底 */
                 source: task.source ?? "agent",
-                params: task.params,
-                /** 抓取目标：manual 任务由插件上报的起始页（type=page），agent 任务可从 params 回退推导 */
-                target: resolveTaskTarget(task),
+                params: redactTaskParams(task.params),
+                /** 抓取目标：manual 任务由插件上报的起始页（type=page），agent 任务可从 params 回退推导；URL 已脱敏 */
+                target: redactTaskTarget(resolveTaskTarget(task)),
                 /** 插件解析后的真实数据集 id（AI 给的只是名字；早期失败/未解析时为 null） */
                 datasetId: Number.isFinite(task.datasetId) ? task.datasetId : null,
                 /** 数据集名：manual 任务只有插件上报才有（agent 可回退到 AI 请求名） */
@@ -504,7 +523,7 @@ const MAX_TARGET_VALUE_LEN = 2048;
 const MAX_DATASET_NAME_LEN = 100;
 
 /** 插件上报的抓取目标形状校验（`{ type, value }` 且两者皆非空字符串、长度受限） */
-const TASK_TARGET_TYPES = new Set(["keyword", "noteUrl", "page"]);
+const TASK_TARGET_TYPES = new Set(["keyword", "noteUrl", "authorUrl", "page"]);
 
 function isTaskTarget(value) {
     return (
@@ -535,7 +554,48 @@ function resolveTaskTarget(task) {
     if (typeof task?.params?.noteUrl === "string" && task.params.noteUrl !== "") {
         return { type: "noteUrl", value: task.params.noteUrl };
     }
+    if (typeof task?.params?.authorUrl === "string" && task.params.authorUrl !== "") {
+        return { type: "authorUrl", value: task.params.authorUrl };
+    }
     return null;
+}
+
+/** 出站剥离的访问令牌参数（与插件 toReportableUrl 同口径） */
+const REPORT_STRIPPED_QUERY_KEYS = new Set(["xsec_token", "xsec_source"]);
+
+function toReportableUrl(value) {
+    try {
+        const parsed = new URL(value);
+        let changed = false;
+        for (const key of [...parsed.searchParams.keys()]) {
+            if (REPORT_STRIPPED_QUERY_KEYS.has(key)) {
+                parsed.searchParams.delete(key);
+                changed = true;
+            }
+        }
+        return changed ? parsed.toString() : value;
+    } catch {
+        return value;
+    }
+}
+
+/**
+ * 快照出站脱敏：本地 task.params/target 保留导航所需的 token（Broker 重启后续抓），
+ * 但对 AI 的响应不能带 xsec_token/xsec_source。
+ */
+function redactTaskParams(params) {
+    if (!params || typeof params !== "object") return params;
+    const copy = { ...params };
+    for (const key of ["noteUrl", "authorUrl"]) {
+        if (typeof copy[key] === "string") copy[key] = toReportableUrl(copy[key]);
+    }
+    return copy;
+}
+
+function redactTaskTarget(target) {
+    if (!target) return target;
+    if (target.type !== "noteUrl" && target.type !== "authorUrl" && target.type !== "page") return target;
+    return { ...target, value: toReportableUrl(target.value) };
 }
 
 /** progressHistory 条目的对外紧凑投影（控制响应体积；不改动落盘结构） */

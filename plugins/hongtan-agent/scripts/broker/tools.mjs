@@ -51,7 +51,8 @@ const TOOL_SYNC_TIMEOUTS = {
 };
 
 /**
- * 由任务参数构造拉起用深链（§9.1 步骤 6）。纯函数：无 keyword/noteUrl 时返回 null（空白页）。
+ * 由任务参数构造拉起用深链（§9.1 步骤 6）。纯函数：无目标时返回 null（空白页）。
+ * noteUrl/authorUrl 在 toolStartCrawl 中已按白名单剥离 query（只留 xsec_token/xsec_source），
  * 与插件侧 deepLink.ts 同口径；URL 白名单在 browser/launch-command.mjs 二次校验。
  */
 export function buildTaskLaunchUrl(params) {
@@ -59,19 +60,113 @@ export function buildTaskLaunchUrl(params) {
         return `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(params.keyword)}`;
     }
     if (params?.noteUrl) return params.noteUrl;
+    if (params?.authorUrl) return params.authorUrl;
     return null;
 }
 
-function isValidXhsNoteUrl(url) {
+/** 作者主页目标所需的最低插件能力版本（与其他模式的能力发现解耦） */
+export const AUTHOR_TARGET_MIN_TOOLS_VERSION = 15;
+
+export function supportsAuthorTarget(toolsVersion) {
+    return Number.isInteger(toolsVersion) && toolsVersion >= AUTHOR_TARGET_MIN_TOOLS_VERSION;
+}
+
+const NOTE_PATH_RE = /^\/explore\/[A-Za-z0-9]+\/?$/;
+const AUTHOR_PATH_RE = /^\/user\/profile\/[A-Za-z0-9]+\/?$/;
+const PROFILE_WITH_NOTE_PATH_RE = /^\/user\/profile\/[A-Za-z0-9]+\/.+$/;
+/** 目标 URL 只保留访问令牌类 query：剥离 tab 等会切换列表的参数 */
+const TARGET_QUERY_WHITELIST = ["xsec_token", "xsec_source"];
+/** 出站/审计剥离的令牌参数（与插件 toReportableUrl 同口径） */
+const REPORT_STRIPPED_QUERY_KEYS = new Set(TARGET_QUERY_WHITELIST);
+const KEYWORD_LINK_MARKERS = ["http://", "https://", "xiaohongshu.com/", "xhslink.com"];
+
+function parseXhsTargetUrl(raw) {
     try {
-        const parsed = new URL(url);
-        return (
-            (parsed.protocol === "https:" || parsed.protocol === "http:") &&
-            (parsed.hostname === XHS_URL_HOST_SUFFIX || parsed.hostname.endsWith(`.${XHS_URL_HOST_SUFFIX}`))
-        );
+        const parsed = new URL(raw);
+        if (parsed.protocol !== "https:") return null;
+        if (parsed.hostname !== XHS_URL_HOST_SUFFIX && !parsed.hostname.endsWith(`.${XHS_URL_HOST_SUFFIX}`)) return null;
+        return parsed;
     } catch {
-        return false;
+        return null;
     }
+}
+
+/** 导航用 URL：只保留 xsec_token/xsec_source，剥离 tab 等列表切换参数 */
+export function sanitizeTargetUrl(raw) {
+    const parsed = new URL(raw);
+    const kept = new URLSearchParams();
+    for (const key of TARGET_QUERY_WHITELIST) {
+        const value = parsed.searchParams.get(key);
+        if (value !== null) kept.append(key, value);
+    }
+    parsed.search = kept.toString();
+    parsed.hash = "";
+    return parsed.toString();
+}
+
+/** 出站/审计用 URL：去掉访问令牌，保留其余参数 */
+export function redactTargetUrl(raw) {
+    try {
+        const parsed = new URL(raw);
+        let changed = false;
+        for (const key of [...parsed.searchParams.keys()]) {
+            if (REPORT_STRIPPED_QUERY_KEYS.has(key)) {
+                parsed.searchParams.delete(key);
+                changed = true;
+            }
+        }
+        return changed ? parsed.toString() : raw;
+    } catch {
+        return raw;
+    }
+}
+
+function redactTargetParams(params) {
+    if (!params || typeof params !== "object") return params;
+    const copy = { ...params };
+    for (const key of ["noteUrl", "authorUrl"]) {
+        if (typeof copy[key] === "string") copy[key] = redactTargetUrl(copy[key]);
+    }
+    return copy;
+}
+
+/** 单篇 URL 校验：仅 https + xiaohongshu.com 域 + /explore/{id}；query 不参与判定 */
+function validateNoteTargetUrl(raw) {
+    const parsed = parseXhsTargetUrl(raw);
+    if (!parsed) {
+        return { error: "noteUrl 仅支持 https://www.xiaohongshu.com/explore/{id}；请重新复制完整链接（短链/其它站点不支持）" };
+    }
+    const path = parsed.pathname;
+    if (AUTHOR_PATH_RE.test(path)) {
+        return { error: "这是作者主页链接，请改用 authorUrl；只要其中一篇请重新复制该笔记的 /explore/{id} 链接" };
+    }
+    if (PROFILE_WITH_NOTE_PATH_RE.test(path)) {
+        return { error: "这是带笔记段的作者链接；要抓单篇请重新复制该笔记的 /explore/{id} 链接，要抓作者主页请改用 authorUrl" };
+    }
+    if (path.startsWith("/search_result")) {
+        return { error: "这是搜索结果页，不是单篇笔记；按关键词采集请改用 keyword，单篇请重新复制 /explore/{id} 链接" };
+    }
+    if (!NOTE_PATH_RE.test(path)) {
+        return { error: `不支持的单篇链接形态（${path}）；仅支持 https://www.xiaohongshu.com/explore/{id}，请重新复制完整链接` };
+    }
+    return { parsed };
+}
+
+/** 作者主页 URL 校验：仅 https + xiaohongshu.com 域 + /user/profile/{id} 根路径 */
+function validateAuthorTargetUrl(raw) {
+    const parsed = parseXhsTargetUrl(raw);
+    if (!parsed) {
+        return { error: "authorUrl 仅支持 https://www.xiaohongshu.com/user/profile/{userId} 根路径；请重新复制链接（短链/其它站点不支持）" };
+    }
+    const path = parsed.pathname;
+    if (NOTE_PATH_RE.test(path)) return { error: "这是单篇笔记链接，请改用 noteUrl" };
+    if (PROFILE_WITH_NOTE_PATH_RE.test(path)) {
+        return { error: "这个链接同时带了作者和笔记；要抓主页请去掉后面的笔记段，要抓这一篇请改用 noteUrl（/explore/{id}）" };
+    }
+    if (!AUTHOR_PATH_RE.test(path)) {
+        return { error: `不支持的作者主页链接形态（${path}）；仅支持根路径 /user/profile/{id}` };
+    }
+    return { parsed };
 }
 
 /**
@@ -508,23 +603,80 @@ export function createToolExecutor({
         if (typeof args?.resumeTaskId === "string" && args.resumeTaskId.trim() !== "") {
             return err(
                 "INVALID_ARGS",
-                "不支持 resumeTaskId 参数；请用 keyword 或 noteUrl 加 articleLimit 新开任务（articleLimit 必填 1-500，续抓剩余量可用快照的 remaining）"
+                "不支持 resumeTaskId 参数；请用 keyword、noteUrl 或 authorUrl 新开任务（keyword/authorUrl 必填 articleLimit 1-500，noteUrl 可省略；续抓剩余量可用快照的 remaining）"
             );
         }
 
-        // 1. 契约校验（articleLimit 必填等；keyword/noteUrl 二选一为 schema 之外的互斥语义）
-        const schemaError = validate("xhs_start_crawl", args);
-        if (schemaError) return err("INVALID_ARGS", schemaError);
-        const hasKeyword = typeof args.keyword === "string" && args.keyword.trim() !== "";
-        const hasNoteUrl = typeof args.noteUrl === "string" && args.noteUrl.trim() !== "";
-        if (hasKeyword === hasNoteUrl) {
-            return err("INVALID_ARGS", "keyword 与 noteUrl 必须二选一");
+        // 1. 目标归一（先于 schema）：trim 后恰好一个非空；空字符串视为未提供。
+        //    非字符串目标明确拒绝，不能因为同时传了另一个合法目标就被静默丢弃。
+        for (const key of ["keyword", "noteUrl", "authorUrl"]) {
+            const value = args?.[key];
+            if (value !== undefined && value !== null && typeof value !== "string") {
+                return err("INVALID_ARGS", `${key} 必须是字符串`);
+            }
         }
-        if (hasNoteUrl && !isValidXhsNoteUrl(args.noteUrl)) {
-            return err("URL_NOT_MATCHED", "noteUrl 仅支持 xiaohongshu.com 域内 URL");
+        const keyword = typeof args?.keyword === "string" ? args.keyword.trim() : "";
+        const noteUrl = typeof args?.noteUrl === "string" ? args.noteUrl.trim() : "";
+        const authorUrl = typeof args?.authorUrl === "string" ? args.authorUrl.trim() : "";
+        const present = [keyword && "keyword", noteUrl && "noteUrl", authorUrl && "authorUrl"].filter(Boolean);
+        if (present.length !== 1) {
+            return err(
+                "INVALID_ARGS",
+                present.length === 0
+                    ? "必须三选一提供 keyword、noteUrl、authorUrl 之一"
+                    : `keyword、noteUrl、authorUrl 必须三选一，当前同时传了: ${present.join(", ")}`
+            );
+        }
+        const mode = present[0];
+        const schemaArgs = { ...args };
+        // schema 也按 trim 后的目标校验（keyword 的 1-50 是 trim 后口径；空字符串视为未提供）
+        const normalizedTargets = { keyword, noteUrl, authorUrl };
+        for (const key of Object.keys(normalizedTargets)) {
+            if (normalizedTargets[key]) schemaArgs[key] = normalizedTargets[key];
+            else delete schemaArgs[key];
         }
 
-        // 2. 单飞互斥（按对方状态给出可转述的处置指引）
+        // 2. 单篇数量先归一（先于 schema）：缺省或任何整数都按 1；非整数留给 schema 报类型错误
+        if (mode === "noteUrl" && (schemaArgs.articleLimit === undefined || Number.isInteger(schemaArgs.articleLimit))) {
+            schemaArgs.articleLimit = 1;
+        }
+
+        // 3. 契约校验（仅类型/长度；三选一与数量范围由本函数运行时判定）
+        const schemaError = validate("xhs_start_crawl", schemaArgs);
+        if (schemaError) return err("INVALID_ARGS", schemaError);
+
+        // 4. 按模式校验 URL / 关键词并剥离 query
+        let sanitizedTarget = null;
+        let effectiveArticleLimit = null;
+        if (mode === "keyword") {
+            if (KEYWORD_LINK_MARKERS.some((marker) => keyword.toLowerCase().includes(marker))) {
+                return err("INVALID_ARGS", "keyword 不能是链接；单篇请用 noteUrl，作者主页请用 authorUrl");
+            }
+            effectiveArticleLimit = schemaArgs.articleLimit;
+            if (!Number.isInteger(effectiveArticleLimit) || effectiveArticleLimit < 1 || effectiveArticleLimit > 500) {
+                return err("INVALID_ARGS", "keyword 模式必须提供 articleLimit（1-500 的整数）");
+            }
+        } else if (mode === "noteUrl") {
+            const check = validateNoteTargetUrl(noteUrl);
+            if (check.error) return err("URL_NOT_MATCHED", check.error);
+            sanitizedTarget = sanitizeTargetUrl(noteUrl);
+            effectiveArticleLimit = 1;
+        } else {
+            const check = validateAuthorTargetUrl(authorUrl);
+            if (check.error) return err("URL_NOT_MATCHED", check.error);
+            effectiveArticleLimit = schemaArgs.articleLimit;
+            if (!Number.isInteger(effectiveArticleLimit) || effectiveArticleLimit < 1 || effectiveArticleLimit > 500) {
+                return err("INVALID_ARGS", "authorUrl 模式必须提供 articleLimit（1-500 的整数）");
+            }
+            // 作者主页是 v15 新增能力：在线时先做能力发现，旧插件不建任务、不拉起浏览器。
+            // 离线时没有 toolsVersion 可查，交给 hello 后的 dispatchPendingTasks 再拦。
+            if (session.isConnected() && !supportsAuthorTarget(session.extensionInfo()?.toolsVersion)) {
+                return err("PROTOCOL_VERSION_MISMATCH", "作者主页抓取需要插件 toolsVersion>=15，请升级插件后重试（不要改用关键词模式绕过）");
+            }
+            sanitizedTarget = sanitizeTargetUrl(authorUrl);
+        }
+
+        // 5. 单飞互斥（按对方状态给出可转述的处置指引）
         const active = taskStore.activeTask();
         if (active) {
             const busyHint =
@@ -534,7 +686,7 @@ export function createToolExecutor({
             return err("TASK_BUSY", `任务占用中（taskId=${active.id}, state=${active.state}）：${busyHint}`);
         }
 
-        // 3. 配额预检（§10.5）：读插件上报的配额快照做派发前拦截——未到可启动时刻直接拒绝、
+        // 6. 配额预检（§10.5）：读插件上报的配额快照做派发前拦截——未到可启动时刻直接拒绝、
         //    不建任务（保住秒回 UX）。快照缺失（旧插件/扩展离线）时跳过，交给插件在派发时权威重判。
         const quotaInfo = session.extensionInfo()?.quota ?? null;
         if (quotaInfo && Number.isFinite(quotaInfo.readyAt) && quotaInfo.readyAt > now()) {
@@ -542,18 +694,18 @@ export function createToolExecutor({
             return err("QUOTA_EXCEEDED", formatQuotaMessage(quotaInfo));
         }
 
-        // 4. 建任务
+        // 7. 建任务（本地账本保留导航所需的 token；审计用脱敏副本）
         const params = {
-            ...(hasKeyword ? { keyword: args.keyword.trim() } : { noteUrl: args.noteUrl.trim() }),
+            ...(mode === "keyword" ? { keyword } : mode === "noteUrl" ? { noteUrl: sanitizedTarget } : { authorUrl: sanitizedTarget }),
             ...(args.datasetName ? { datasetName: args.datasetName.trim() } : {}),
-            articleLimit: args.articleLimit,
+            articleLimit: effectiveArticleLimit,
             ...(args.config ? { config: args.config } : {}),
         };
         const task = taskStore.createTask({ kind: "crawl", params });
         // §11.1：任务记录带工具名（唯一建任务的工具就是本工具）
-        audit?.append("task_created", { taskId: task.id, tool: "xhs_start_crawl", params });
+        audit?.append("task_created", { taskId: task.id, tool: "xhs_start_crawl", params: redactTargetParams(params) });
 
-        // 5. 派发（扩展在线直发；离线则幂等拉起浏览器 + 等连接，90s 截止）
+        // 8. 派发（扩展在线直发；离线则幂等拉起浏览器 + 等连接，90s 截止）
         if (session.isConnected()) {
             const sent = session.sendTaskStart(task);
             if (sent) {
@@ -784,7 +936,7 @@ export function createToolExecutor({
         if (DATA_READ_TOOLS.has(tool) && session.extensionInfo()?.deviceApproved === false) {
             return err("DEVICE_NOT_APPROVED", "设备未确认或已被撤销，请在红探插件设置 →「AI 接管」中确认本机设备");
         }
-        // 5. xhs_start_crawl 自带参数校验（keyword/noteUrl 互斥与 resumeTaskId 显式拒绝为 schema
+        // 5. xhs_start_crawl 自带参数校验（三选一与 resumeTaskId 显式拒绝为 schema
         //    之外的语义），先于通用校验分派
         if (tool === "xhs_start_crawl") return toolStartCrawl(args);
         const schemaError = validate(tool, args);

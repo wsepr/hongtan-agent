@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "name": "hongtan-agent-tools",
     "protocolVersion": 2,
-    "toolsVersion": 14,
+    "toolsVersion": 15,
     "description": "红探（小红书评论采集插件）AI Agent 控制契约：MCP 工具集 + 统一错误码表。本文件为唯一真源，插件侧 errors/protocol 与 Broker 侧工具执行器均以此为基准对齐。【契约维护说明】① 可校验的约束只放 inputSchema，语义说明放 description——二者不得互相声称对方该管。② 新旧版本组合只能变严、不能报错：数值上限类约束由 Broker 按自身 limits 自钳，并在响应回 effective* 值。③ 隐私红线：页面可见文本（如标签页标题摘录）只进工具响应，不得落 tasks.json / audit.jsonl；runtime/指纹类出参不得回传 cookie、token、deviceId 公钥与配对指纹。④ 错误码 aiGuidance 中的「重复执行后果」描述该码被盲目重试时的实际效果，AI 据此判断是否值得重试。",
     "limits": {
         "articleLimitMax": 500,
@@ -42,8 +42,8 @@
             "retryable": false
         },
         "PROTOCOL_VERSION_MISMATCH": {
-            "message": "协议版本不匹配",
-            "aiGuidance": "提示用户升级红探插件或红探本机服务。重复执行结果相同，必须先升级。",
+            "message": "协议/能力版本不匹配",
+            "aiGuidance": "提示用户升级红探插件或红探本机服务。作者主页抓取需要插件 toolsVersion>=15；不要改用关键词模式绕过（目标类型已由用户确认，换模式会抓错内容）。重复执行结果相同，必须先升级。",
             "retryable": false
         },
         "VIP_REQUIRED": {
@@ -57,23 +57,23 @@
             "retryable": false
         },
         "LOGIN_WALL": {
-            "message": "小红书登录墙：页面可打开但未登录导致结果列表为空",
-            "aiGuidance": "提示用户在浏览器中登录小红书后重试。登录前重复执行只会再次撞墙。",
+            "message": "小红书登录墙：搜索页可打开但未登录导致结果列表为空",
+            "aiGuidance": "仅用于关键词搜索页首屏 0 卡片；提示用户在浏览器中登录小红书后重试。作者主页 0 卡片不用本码（可能是作者没有公开笔记），按 CONTENT_NOT_READY 中性说明。登录前重复执行只会再次撞墙。",
             "retryable": false
         },
         "CONTENT_NOT_READY": {
-            "message": "页面内容脚本未就绪（超时或页面类型不符）",
-            "aiGuidance": "说明页面类型可能不符或被重定向；最多允许重试一次。注意该码成因多样（页面没跟上 / 消息超时但抓取可能已开始 / 页面已有别的抓取在跑 / 抓取异常），盲目多次重试无法区分成因——重试前先用 xhs_task_status 查看是否已有任务在跑。",
+            "message": "页面内容脚本未就绪或页面未给出可抓列表（超时、页面类型不符、作者主页 0 卡片）",
+            "aiGuidance": "说明页面可能未加载完成、被重定向，或作者主页没有可抓的公开笔记；作者主页 0 卡片时如实说「可能未登录，或该作者没有公开笔记」，不要断言是登录问题。最多允许重试一次；重试前先用 xhs_task_status 查看是否已有任务在跑。",
             "retryable": true
         },
         "URL_NOT_MATCHED": {
-            "message": "目标 URL 不在插件注入范围（仅支持搜索结果页 / 笔记详情页 / 用户主页）",
-            "aiGuidance": "说明该 URL 不受支持，请改用 keyword 搜索。重复执行结果相同。",
+            "message": "URL 与抓取模式不匹配或不受支持",
+            "aiGuidance": "单篇只接受 https://www.xiaohongshu.com/explore/{id}（noteUrl）；作者主页只接受 https://www.xiaohongshu.com/user/profile/{id} 根路径（authorUrl）。按错误消息提示改用对应参数或请用户重新复制链接（短链、分享文案、/discovery/item 等形态不受支持）；不要原样重试、不要静默换模式。",
             "retryable": false
         },
         "TAB_UNAVAILABLE": {
             "message": "抓取标签页已关闭或不可用",
-            "aiGuidance": "任务已终态失败（不会自动恢复）。按 TASK_INTERRUPTED 的指引计算剩余量、征得用户同意后用原参数新开任务。重复原样调用结果相同。",
+            "aiGuidance": "任务已终态失败（不会自动恢复）。读快照 remaining 与 targetArticles（不要再用 summary.articles 与 params.articleLimit 推算），征得用户同意后用原目标参数新开任务；noteUrl/authorUrl 的 remaining=0 不代表评论完整，按 TASK_INTERRUPTED 的目标分流处理（单篇 skipExistingArticles=false，keyword/authorUrl 保持 true）。重复原样调用结果相同。",
             "retryable": false
         },
         "TASK_BUSY": {
@@ -108,7 +108,7 @@
         },
         "TASK_INTERRUPTED": {
             "message": "任务被中断，已终态失败（error.reason 说明具体原因：tab_closed/page_left/heartbeat_timeout/browser_gone/stalled_timeout）",
-            "aiGuidance": "该码只表示**终态**中断（窗口被最小化/遮挡导致的**暂停**是可自愈的 `stalled_by_background`，不属于本码：若任务仍在暂停中，不要重开——先调 `xhs_activate_window` 抢回窗口前台（或请用户点任务栏中闪烁的窗口），恢复可见即自动继续；`error.reason=stalled_timeout` 表示窗口最小化/遮挡后 10 分钟内始终未被恢复可见、由插件兜底收尾，根因仍是暂停）。任务不可复活、不会自动恢复。读快照 processed.articles 与 targetArticles 计算 remaining（快照已带 remaining 字段；manual 任务同口径）：remaining=0 时先看 targetArticles——为 null 表示目标未知（旧版插件、或本机服务重启后刚认领尚未回放进度的任务），此时如实说明「本任务目标篇数未知，无法判断是否抓满」，不要断定已抓满；targetArticles 有值且 remaining=0 才告知用户本任务已抓满、不重开；remaining>0 则征得用户同意后用原参数新开任务——同 keyword 与 datasetName，articleLimit=remaining，skipExistingArticles=true（不重复入库），其余 config 沿用。同一任务因基础设施中断最多建议重试一次；被 QUOTA_EXCEEDED 拒绝时如实转述可重试时刻，不要换参硬试。",
+            "aiGuidance": "该码只表示**终态**中断（窗口被最小化/遮挡导致的**暂停**是可自愈的 `stalled_by_background`，不属于本码：若任务仍在暂停中，不要重开——先调 `xhs_activate_window` 抢回窗口前台（或请用户点任务栏中闪烁的窗口），恢复可见即自动继续；`error.reason=stalled_timeout` 表示窗口最小化/遮挡后 10 分钟内始终未被恢复可见、由插件兜底收尾，根因仍是暂停）。任务不可复活、不会自动恢复。单篇与作者主页任务即使进度已到目标也必须是 failed（最后篇评论可能未抓完），不得当 completed。读快照 remaining 与 targetArticles（不要用 summary.articles + params.articleLimit 推算；manual 任务同口径）：remaining=0 不能一概当作“已抓满”——keyword 才适用（targetArticles 为 null 时属目标未知，如实说明无法判断）；noteUrl 中断后 remaining 可能为 0，但评论可能不完整，用户要完整评论时用同 noteUrl、skipExistingArticles=false 重试（单篇固定 1 篇，articleLimit 可选）；authorUrl 的 remaining>0 时先用 remaining+skipExistingArticles=true 补未处理笔记，remaining=0 时不要宣告完成，说明最后一篇评论可能不完整，用户要求完整时对那一篇发 noteUrl 单篇任务并 skipExistingArticles=false（需要时请用户提供该篇链接）。不要为了最后一篇把作者任务改成 false 从头重扫。重试 URL 以用户原始消息为准（任务快照 target 已脱敏，不能直接拿来重试）。同一任务因基础设施中断最多建议重试一次；被 QUOTA_EXCEEDED 拒绝时如实转述可重试时刻，不换参硬试。",
             "retryable": true
         },
         "RATE_LIMITED": {
@@ -128,7 +128,7 @@
         },
         "INVALID_ARGS": {
             "message": "参数校验失败",
-            "aiGuidance": "按工具 inputSchema 修正参数后重试（注意 articleLimit 必填）。不改参数的重试结果相同。",
+            "aiGuidance": "按工具 inputSchema 修正参数后重试：keyword/noteUrl/authorUrl 恰好三选一；keyword 不得是链接（含 xiaohongshu.com、xhslink.com）；keyword/authorUrl 必须带 articleLimit 1-500；noteUrl 可省略 articleLimit，传入整数会按 1 处理。不改参数的重试结果相同。",
             "retryable": true
         },
         "UNKNOWN_TOOL": {
@@ -166,7 +166,7 @@
         {
             "name": "xhs_connection_status",
             "kind": "control",
-            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。离线（extension.connected=false）时另回 lastKnown（上次在线时的会话摘要：lastSeenAt/vip/quota/extId/browserFamily/cachedAt；超 24 小时或换浏览器/extId 不匹配时为 null——不得拿不确定的旧数据当决策依据）、canWake（是否可唤醒，true 表示可调 xhs_prepare_env 拉起浏览器）与 alerts（最近告警摘要，白名单字段只有 kind/at/taskId，仅覆盖当前 Broker 进程存活期；跨重启历史只能查 stateDir/audit.jsonl）。在线时 lastKnown 恒为 null——在线回答只来自活体查询。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。 在线时 extension 段另含 toolsVersion（插件实际支持的契约工具版本）与 capabilities{readDatasetMode,readCrossDatasetIds,readFileOutput}；旧插件缺省表示能力未知/全部 false；此时提示用户更新插件/本机服务，不回退旧读取形态。",
+            "description": "查询红探插件 Agent 桥接的连接与配对状态。返回 extension（是否已连上 Broker、浏览器家族）、pairing（设备是否已批准、待批准设备列表）、vip（isVip、effectiveArticleLimit、vipExpiresAt=会员到期时间、envelopeExpiresAt=信封自身到期时间，两者语义不同）、quota（任务节奏配额快照：readyAt 非空表示需等到该时刻才能启动新任务，附带原因 reason；响应中无 quota 键 = 运行中的服务进程旧于契约，按「结束进程后自动重拉」处置）、activeTask 与 onboarding 提示。另含 runtime 块（broker/adapter/extension 各自的 version、buildId、contractsHash 与 agreement.contractsMatch/staleSuspect）：agreement.contractsMatch=false 表示有一方运行进程旧于契约，按 RUNTIME_STALE 处置；adapter 段为 null 表示调用方较旧、未上送指纹。离线（extension.connected=false）时另回 lastKnown（上次在线时的会话摘要：lastSeenAt/vip/quota/extId/browserFamily/cachedAt；超 24 小时或换浏览器/extId 不匹配时为 null——不得拿不确定的旧数据当决策依据）、canWake（是否可唤醒，true 表示可调 xhs_prepare_env 拉起浏览器）与 alerts（最近告警摘要，白名单字段只有 kind/at/taskId，仅覆盖当前 Broker 进程存活期；跨重启历史只能查 stateDir/audit.jsonl）。在线时 lastKnown 恒为 null——在线回答只来自活体查询。开始任何抓取工作前必须先调用本工具确认链路就绪；无参数。 在线时 extension 段另含 toolsVersion（插件实际支持的契约工具版本；作者主页抓取要求 >=15，低于该版本会返回 PROTOCOL_VERSION_MISMATCH）与 capabilities{readDatasetMode,readCrossDatasetIds,readFileOutput}；旧插件缺省表示能力未知/全部 false；此时提示用户更新插件/本机服务，不回退旧读取形态。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -434,7 +434,7 @@
         {
             "name": "xhs_start_crawl",
             "kind": "async",
-            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/页面、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword 与 noteUrl 必须二选一；articleLimit 必填（缺省会让插件按内部默认值 1 篇执行，与用户预期不符）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试。【失败后的重试】先分清「暂停」与「失败」：抓取窗口被最小化/不可见时任务处于 `stalled_by_background`（同一任务，**调 `xhs_activate_window` 抢回窗口前台/请用户点任务栏窗口让它恢复可见即自动继续**；只有 10 分钟内一直未恢复可见才由插件兜底转终态），**不要**因此新开任务。终态失败（`TASK_INTERRUPTED`／`BLOCKED_BY_RISK`）不存在续跑：读快照 processed.articles 与 remaining（= max(0, targetArticles − 已抓篇数)，manual 任务同口径），remaining=0 则告知用户已完成、不重开（targetArticles 为 null 时属目标未知，不要断定已完成）；remaining>0 则征得用户同意后用**原参数新开任务**——同 keyword/noteUrl 与 datasetName，articleLimit=remaining，skipExistingArticles=true（不重复入库），其余 config 沿用；同一任务因基础设施中断最多建议重试一次。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限 1-2000，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持 AI 干预**：失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
+            "description": "在红探插件中启动评论抓取任务。立即返回 {taskId, state}，不会等待任务完成；浏览器未运行时可直接调用本工具，本机服务会自动拉起浏览器并等待扩展连接，无需用户先手动打开浏览器（仅首次引导——扩展从未连接过、本机无从解析浏览器配置——除外，此时会转 EXTENSION_UNAVAILABLE，按该码指引人工处理）。任务会依次经历 launching_browser（正在启动浏览器）、waiting_extension（等待扩展连接）、running（抓取中）等状态。启动浏览器约需 10-60 秒，期间应告知用户「正在启动浏览器，请稍候」，并用 xhs_task_status 轮询跟进（间隔不少于 10 秒，禁止紧密轮询）。启动前必须向用户复述「目标关键词/单篇笔记/作者主页、数据集名、数量上限」并获确认，同时说明：该操作会打开一个独立的抓取窗口（不占用当前页面），本机会在启动时**尝试**把该窗口带到前台（失败不阻塞任务；由本机服务冷启动的浏览器被遮挡也不会再停摆）；采集期间若该窗口被最小化，任务会暂停（恢复窗口可见后自动继续）——无需要求用户保持前台，只需告知「最小化会暂停任务」。keyword、noteUrl、authorUrl 必须三选一：keyword 走关键词搜索；noteUrl 仅支持 https://www.xiaohongshu.com/explore/{id}，固定 1 篇、不需要向用户确认数量；authorUrl 仅支持 https://www.xiaohongshu.com/user/profile/{id} 根路径，抓取当前可见笔记列表且不受作者黑名单影响。keyword/authorUrl 必须带 articleLimit（1-500）；noteUrl 可省略，Broker 会把任何整数值按 1 处理（非整数是类型错误）。任务启动受「任务节奏配额」约束（按上次任务实际请求量折算冷却）：可先查 xhs_connection_status 的 quota，若被拒会返回 QUOTA_EXCEEDED（消息含原因与可重试时刻）——如实转述时刻、到时间再启动，不要连续试跑或换参数/数据集重试。【失败后的重试】先分清「暂停」与「失败」：抓取窗口被最小化/不可见时任务处于 `stalled_by_background`（同一任务，**调 `xhs_activate_window` 抢回窗口前台/请用户点任务栏窗口让它恢复可见即自动继续**；只有 10 分钟内一直未恢复可见才由插件兜底转终态），**不要**因此新开任务。终态失败（`TASK_INTERRUPTED`／`BLOCKED_BY_RISK`）不存在续跑：读快照 remaining 与 targetArticles（不要用 processed.articles + params.articleLimit 推算，manual 同口径）。remaining=0 不能一概当作已完成：keyword 才表示已抓满（targetArticles 为 null 时属目标未知，不要断定）；noteUrl 中断后 remaining 可能为 0 但评论可能不完整，用户要完整评论时用同 noteUrl、skipExistingArticles=false 重试；authorUrl 的 remaining>0 时征得同意后用原目标参数与 datasetName、articleLimit=remaining、skipExistingArticles=true 补未处理笔记，remaining=0 时不要宣告完成，说明最后一篇评论可能不完整，用户要求完整时对那一篇发 noteUrl+skipExistingArticles=false（需要时请用户提供该篇链接）；不要为最后一篇把作者任务改成 false 从头重扫。重试 URL 以用户原始消息为准（快照 target 已脱敏，不能直接拿来重试）；同一任务因基础设施中断最多建议重试一次。config 可选字段与插件配置界面对齐：commentLimit（每篇评论上限 1-2000，默认 100）、crawlMode（standard/smart，默认 smart）、crawlCommentImages（VIP 专属，默认 false）、skipExistingArticles（跳过数据集已存在笔记，默认 true；用户要增量/补抓时保持默认，要全量重抓时传 false）、autoExpandCommentReplies（自动展开评论回复，默认 false）与 commentExpandLimit（每条最多展开次数 0-999，0=不限，仅展开开启时生效）——用户对这些行为有偏好时按其偏好传入并在确认时复述。任务来源 source 为 manual（用户在插件里手动发起的抓取）时，其进度/结果照常可查，但**不支持 AI 干预**：失败即由用户在插件中重跑；且手工任务活跃时本工具会因全局单飞被拒（TASK_BUSY，来源=manual），此时应等其完成或在插件中结束，不要另起任务。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -442,11 +442,17 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 50,
-                        "description": "小红书搜索关键词（与 noteUrl 二选一）"
+                        "description": "小红书搜索关键词（与 noteUrl/authorUrl 三选一；不得是链接）"
                     },
                     "noteUrl": {
                         "type": "string",
-                        "description": "笔记详情页 URL（与 keyword 二选一，仅支持 xiaohongshu.com 域内）"
+                        "maxLength": 2048,
+                        "description": "单篇笔记 URL（与 keyword/authorUrl 三选一；仅支持 https://www.xiaohongshu.com/explore/{noteId}，可带 query；单篇固定 1 篇）"
+                    },
+                    "authorUrl": {
+                        "type": "string",
+                        "maxLength": 2048,
+                        "description": "作者主页 URL（与 keyword/noteUrl 三选一；仅支持 https://www.xiaohongshu.com/user/profile/{userId} 根路径，可带 query；抓取当前可见笔记列表，篇数由 articleLimit 控制；不受作者黑名单影响）"
                     },
                     "datasetName": {
                         "type": "string",
@@ -456,9 +462,7 @@
                     },
                     "articleLimit": {
                         "type": "integer",
-                        "minimum": 1,
-                        "maximum": 500,
-                        "description": "本任务最多抓取篇数（必填，1-500；与数据集已有数量无关，同一数据集可被多次任务累加；AI 接管为会员专属，非 VIP 一律返回 VIP_REQUIRED，不会降级成更少篇数执行）"
+                        "description": "本任务最多抓取篇数。keyword/authorUrl 模式必填且由 Broker 校验 1-500；noteUrl 模式可省略，Broker 在 schema 校验前把任何整数值覆盖为 1（包括 0/501），非整数仍是类型错误。与数据集已有数量无关，同一数据集可被多次任务累加；AI 接管为会员专属，非 VIP 一律返回 VIP_REQUIRED，不会降级成更少篇数执行"
                     },
                     "config": {
                         "type": "object",
@@ -499,15 +503,13 @@
                         "required": []
                     }
                 },
-                "required": [
-                    "articleLimit"
-                ]
+                "required": []
             }
         },
         {
             "name": "xhs_task_status",
             "kind": "sync",
-            "description": "查询任务快照（状态、进度、当前篇目、错误码与 error.reason、remaining、orphaned、source 来源、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。error.reason 是 TASK_INTERRUPTED 的结构化归因（tab_closed=抓取标签页已关闭 / page_left=页面已离开小红书 / heartbeat_timeout=心跳超时 / browser_gone=浏览器已重启 / stalled_timeout=窗口最小化/遮挡后 10 分钟内始终未被恢复可见、由插件兜底收尾），按对应文案转述即可，不要添加未经证实的归因。remaining = max(0, targetArticles − 已抓篇数)，是失败后新开任务的 articleLimit 依据。**manual（用户在插件里手动发起）与 agent 任务返回同一结构**，下列字段两者都会有：targetArticles=本任务目标总篇数（agent=插件钳制后的真实目标；manual 由插件上报）、currentArticle=当前篇目序号、datasetName=目标数据集名、target={type: keyword|noteUrl|page, value}（manual 的 type=page 即起始页 URL）、effectiveConfig=运行期已生效的抓取配置（手工链路无此事实，为 null）、stateChangedAt=进入当前状态的时刻（暂停态即停摆起点、终态即结束时刻）、durationMs=自本机服务账本建立记录以来的时长（Broker 重启后认领的任务会偏小，此时 adopted=true）。上述字段为 null / 缺失多表示运行中的插件或本机服务版本较旧，不要解读成异常或据此判定任务失败；remaining 在目标未知时兜底 0。params 保留原始请求参数；由本机服务从插件重播认领的任务（含全部 manual 任务）其 params 恒为 {adopted:true, taskId}，只是占位、不含真实抓取参数——真实身份看 target/datasetName/targetArticles；adopted=true 即「由插件重播认领」的记录，其 createdAt 是认领时刻。state=stalled_by_background 是**可自愈的暂停**（不是失败：**调 `xhs_activate_window` 抢回窗口前台 / 请用户点任务栏窗口让它恢复可见即自动继续**；只有 10 分钟内一直未恢复可见才由插件兜底终态化，根因仍是窗口最小化/遮挡），按暂停转述、不要判失败也不要新开任务。orphaned=true 表示任意活跃态任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行收敛为终态）：如实转述「任务暂时失联，插件即将给出终态结论」，不要另起任务。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason} 自述账本新鲜度：staleReason=\"extension-offline\" 表示扩展当前离线（账本里的活跃任务可能已冻结，不要冒充实时——activeTaskFrozen 由 activeTask 非空 && extensionConnected=false 派生）；staleReason=\"broker-restarted\" 表示该任务曾被 Broker 重启占位为失败、正等插件重播核对。源为 manual 的任务（source=\"manual\"）不可由 AI 取消。若「账本有活跃任务但扩展离线」（矛盾信号、幽灵任务嫌疑），响应会带 repair{triggered:true, taskId, skippedReason} 表示已尝试修复式拉起浏览器——如实说明「账本里有一条在跑的任务、但扩展当前离线，属异常，正在重新连接并核对」，不要谎报仍在 running。",
+            "description": "查询任务快照（状态、进度、当前篇目、错误码与 error.reason、remaining、orphaned、source 来源、真实 datasetId 等）。轮询间隔不少于 10 秒；state=failed 时把 error.code 与 error.message 如实转述给用户，不要自行重试。error.reason 是 TASK_INTERRUPTED 的结构化归因（tab_closed=抓取标签页已关闭 / page_left=页面已离开小红书 / heartbeat_timeout=心跳超时 / browser_gone=浏览器已重启 / stalled_timeout=窗口最小化/遮挡后 10 分钟内始终未被恢复可见、由插件兜底收尾），按对应文案转述即可，不要添加未经证实的归因。remaining = max(0, targetArticles − 已抓篇数)，是失败后新开任务的 articleLimit 依据（targetArticles 为 null 表示目标未知，不要断定已完成）。**manual（用户在插件里手动发起）与 agent 任务返回同一结构**，下列字段两者都会有：targetArticles=本任务目标总篇数（agent=插件钳制后的真实目标；manual 由插件上报）、currentArticle=当前篇目序号、datasetName=目标数据集名、target={type: keyword|noteUrl|authorUrl|page, value}（agent 为 keyword/noteUrl/authorUrl；manual 的 type=page 即起始页 URL；URL 已脱敏，重试要用用户原始消息里的链接）、effectiveConfig=运行期已生效的抓取配置（手工链路无此事实，为 null）、stateChangedAt=进入当前状态的时刻（暂停态即停摆起点、终态即结束时刻）、durationMs=自本机服务账本建立记录以来的时长（Broker 重启后认领的任务会偏小，此时 adopted=true）。上述字段为 null / 缺失多表示运行中的插件或本机服务版本较旧，不要解读成异常或据此判定任务失败；remaining 在目标未知时兜底 0。params 为请求参数副本（目标 URL 已去掉 xsec_token/xsec_source）；由本机服务从插件重播认领的任务（含全部 manual 任务）其 params 恒为 {adopted:true, taskId}，只是占位、不含真实抓取参数——真实身份看 target/datasetName/targetArticles；adopted=true 即「由插件重播认领」的记录，其 createdAt 是认领时刻。state=stalled_by_background 是**可自愈的暂停**（不是失败：**调 `xhs_activate_window` 抢回窗口前台 / 请用户点任务栏窗口让它恢复可见即自动继续**；只有 10 分钟内一直未恢复可见才由插件兜底终态化，根因仍是窗口最小化/遮挡），按暂停转述、不要判失败也不要新开任务。orphaned=true 表示任意活跃态任务超过 60 秒没有新消息（上报侧暂时失联，插件会自行收敛为终态）：如实转述「任务暂时失联，插件即将给出终态结论」，不要另起任务。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason} 自述账本新鲜度：staleReason=\"extension-offline\" 表示扩展当前离线（账本里的活跃任务可能已冻结，不要冒充实时——activeTaskFrozen 由 activeTask 非空 && extensionConnected=false 派生）；staleReason=\"broker-restarted\" 表示该任务曾被 Broker 重启占位为失败、正等插件重播核对。源为 manual 的任务（source=\"manual\"）不可由 AI 取消。若「账本有活跃任务但扩展离线」（矛盾信号、幽灵任务嫌疑），响应会带 repair{triggered:true, taskId, skippedReason} 表示已尝试修复式拉起浏览器——如实说明「账本里有一条在跑的任务、但扩展当前离线，属异常，正在重新连接并核对」，不要谎报仍在 running。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -525,7 +527,7 @@
         {
             "name": "xhs_task_list",
             "kind": "sync",
-            "description": "查询最近任务列表（供用户回来后排障与复盘「我不在的时候发生了什么」）。可按 limit 截取条数，也可按 datasetId 只看某个数据集的任务（datasetId 是插件解析后的真实数据集 id，可从 xhs_list_datasets 或任务快照的 datasetId 字段获得；注意它不是 AI 传入 datasetName 的替代——重名/改名后按名字无法定位）。每条任务快照含 datasetId（未解析数据集的早期失败为 null）、datasetName、target（keyword/noteUrl/page 起始页）、targetArticles 与 remaining（口径同 xhs_task_status，manual 亦然）与 source（\"agent\"=AI 发起，\"manual\"=用户在插件里手动发起；manual 任务只覆盖本次能力实施之后的手工任务，**不得声称这就是全部历史手工任务**）。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason}（账本新鲜度自述；staleReason=\"extension-offline\" 时活跃任务可能已冻结）与（仅在「有活跃任务且扩展离线」时出现的）repair{triggered:true, taskId, skippedReason}（已尝试修复式拉起浏览器；如实说明异常，不要谎报 running）。",
+            "description": "查询最近任务列表（供用户回来后排障与复盘「我不在的时候发生了什么」）。可按 limit 截取条数，也可按 datasetId 只看某个数据集的任务（datasetId 是插件解析后的真实数据集 id，可从 xhs_list_datasets 或任务快照的 datasetId 字段获得；注意它不是 AI 传入 datasetName 的替代——重名/改名后按名字无法定位）。每条任务快照含 datasetId（未解析数据集的早期失败为 null）、datasetName、target（keyword/noteUrl/authorUrl，manual 为 page 起始页；URL 已脱敏）、targetArticles 与 remaining（口径同 xhs_task_status，manual 亦然）与 source（\"agent\"=AI 发起，\"manual\"=用户在插件里手动发起；manual 任务只覆盖本次能力实施之后的手工任务，**不得声称这就是全部历史手工任务**）。响应含 freshness{extensionConnected, lastExtensionMessageAt, staleReason}（账本新鲜度自述；staleReason=\"extension-offline\" 时活跃任务可能已冻结）与（仅在「有活跃任务且扩展离线」时出现的）repair{triggered:true, taskId, skippedReason}（已尝试修复式拉起浏览器；如实说明异常，不要谎报 running）。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

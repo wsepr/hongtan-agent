@@ -18,14 +18,14 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { createLoopbackWebSocketServer } from "./websocket-server.mjs";
-import { createTaskStore, BROKER_INTERMEDIATE_STATES } from "./broker/task-store.mjs";
+import { createTaskStore, BROKER_INTERMEDIATE_STATES, redactSecretsInText } from "./broker/task-store.mjs";
 import { createActionLimiter } from "./broker/rate-limit.mjs";
 import { createAlertMonitor } from "./broker/alerts.mjs";
 import { createHandshakeBackoff, extIdFromOrigin } from "./broker/handshake-backoff.mjs";
 import { createAudit } from "./broker/audit.mjs";
 import { createPairing } from "./broker/pairing.mjs";
 import { createActiveChannelStore, channelKeyOf, ACTIVE_CHANNEL_FILE } from "./broker/active-channel.mjs";
-import { createToolExecutor, buildTaskLaunchUrl } from "./broker/tools.mjs";
+import { createToolExecutor, buildTaskLaunchUrl, supportsAuthorTarget } from "./broker/tools.mjs";
 import { createSessionSnapshotStore } from "./broker/session-snapshot.mjs";
 import { createBrowserManager } from "./broker/browser/index.mjs";
 import { createOsProbes } from "./broker/browser/os-probes.mjs";
@@ -497,7 +497,10 @@ export function createBroker({
         taskStore.setState(adopted, "running");
         if (advertised !== "running") taskStore.noteIntermediateState(taskId, advertised);
         adopted.adoptedFromExtension = true;
-        adopted.lastMessage = msg.data?.message ?? null;
+        // 认领路径不走 noteProgress 的脱敏；这里必须与 task-store 同口径，防止 seq 非法时原文落盘
+        const adoptedMessage = msg.data?.message;
+        adopted.lastMessage =
+            typeof adoptedMessage === "string" ? redactSecretsInText(adoptedMessage) : null;
         taskStore.persist();
         audit.append("task_adopted", { taskId, state: advertised });
     }
@@ -508,6 +511,19 @@ export function createBroker({
             const task = taskStore.get(id);
             if (!task || !["launching_browser", "waiting_extension"].includes(task.state)) continue;
             tools.clearExtensionDeadline(task.id);
+            // 作者主页是 v15 新增能力：离线建的任务在 hello 后才派发，这里按实际插件能力再拦一次
+            if (task.params?.authorUrl) {
+                if (!supportsAuthorTarget(extensionSession?.toolsVersion)) {
+                    taskStore.setState(task, "failed", {
+                        error: {
+                            code: "PROTOCOL_VERSION_MISMATCH",
+                            message: "作者主页抓取需要插件 toolsVersion>=15，请升级插件后重试",
+                        },
+                    });
+                    audit.append("task_failed", { taskId: task.id, code: "PROTOCOL_VERSION_MISMATCH", via: "hello-redelivery" });
+                    continue;
+                }
+            }
             // 预开窗判定：最后一次成功发起的 spawn 属于本任务——spawn 后深链窗口可能仍在创建中，
             // 插件收到后应先短暂等待预开窗再兜底自建。按任务归因，避免同毫秒时间戳漏判与跨任务误判
             const preopened = browserManager.getStatus().lastSpawnTaskId === task.id;
