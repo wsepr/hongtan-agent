@@ -1,23 +1,56 @@
-#!/usr/bin/env bash
-# 红探 Agent launcher（macOS/Linux）
-# 有 Node >= 22 → runtime-launch.mjs（先试受管运行时，否则回退本机 Node 跑同一份源码）
-# 无 Node     → bootstrap-runtime.sh（按 runtime.manifest.json 下载 + SHA-256 校验后执行）
+#!/usr/bin/env sh
+set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+case "$0" in
+    */*) script_dir=${0%/*} ;;
+    *\\*) script_dir=${0%\\*} ;;
+    *) script_dir=. ;;
+esac
+SCRIPT_DIR=$(CDPATH= cd -- "$script_dir" && pwd)
 
-node_major() {
-    "$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null
+# 与 launch-agent.cmd 同源：override -> PATH 里的 node -> WorkBuddy 自带 Node，
+# 每一项都实际执行一次并校验 major >= 22（不能只看第一个候选）。
+probe_node() {
+    [ -n "$1" ] || return 1
+    if ! command -v "$1" >/dev/null 2>&1 && [ ! -x "$1" ]; then
+        return 1
+    fi
+    major=$("$1" -p "process.versions.node.split('.')[0]" 2>/dev/null || true)
+    case "$major" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$major" -ge 22 ]
 }
 
-# PATH 上可能有多个 node：只探第一个，会在「首个 < 22 但后方还有 ≥22」时误走免 Node 路径。
-# type -ap 按查找顺序列出全部候选，取首个主版本 ≥ 22 的。
-while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    NODE_MAJOR="$(node_major "$candidate")" || continue
-    [ -n "$NODE_MAJOR" ] || continue
-    if [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null; then
-        exec "$candidate" "$SCRIPT_DIR/runtime-launch.mjs" "$@"
-    fi
-done < <(type -ap node)
+NODE_BIN=""
+if [ -n "${HONGTAN_AGENT_NODE:-}" ] && probe_node "$HONGTAN_AGENT_NODE"; then
+    NODE_BIN="$HONGTAN_AGENT_NODE"
+fi
+if [ -z "$NODE_BIN" ] && [ -n "${PATH:-}" ]; then
+    old_ifs=$IFS
+    IFS=:
+    for dir in $PATH; do
+        [ -n "$dir" ] || dir=.
+        candidate="$dir/node"
+        if [ -x "$candidate" ] && probe_node "$candidate"; then
+            NODE_BIN="$candidate"
+            break
+        fi
+    done
+    IFS=$old_ifs
+fi
+if [ -z "$NODE_BIN" ] && [ -n "${HOME:-}" ]; then
+    for candidate in "$HOME"/.workbuddy/binaries/node/versions/*/node; do
+        if [ -x "$candidate" ] && probe_node "$candidate"; then
+            NODE_BIN="$candidate"
+            break
+        fi
+    done
+fi
 
-exec bash "$SCRIPT_DIR/bootstrap-runtime.sh" "$@"
+if [ -z "$NODE_BIN" ]; then
+    echo "[hongtan] Node.js 22 or newer is required. Install Node.js or set HONGTAN_AGENT_NODE." >&2
+    exit 1
+fi
+
+exec "$NODE_BIN" "$SCRIPT_DIR/../runtime/hongtan-agent.mjs" "$@"

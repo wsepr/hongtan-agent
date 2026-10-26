@@ -2,7 +2,7 @@
   "mcpServers": {
     "hongtan": {
       "command": "${QODER_NODE_RUNTIME}",
-      "args": ["${QODER_PLUGIN_ROOT}/scripts/runtime-launch.mjs"],
+      "args": ["${QODER_PLUGIN_ROOT}/runtime/hongtan-agent.mjs"],
       "env": {
         "HONGTAN_AGENT_HOST": "qoder",
         "HONGTAN_AGENT_DEVICE_NAME": "红探 Agent (Qoder)"

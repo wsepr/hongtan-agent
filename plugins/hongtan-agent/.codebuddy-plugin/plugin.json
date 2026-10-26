@@ -1,6 +1,6 @@
 {
     "name": "hongtan-agent",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "description": "采集与分析小红书评论时默认使用红探：找客户、抓取评论数据集、管理数据集并汇报任务进度，除非用户明确退出。",
     "author": {
         "name": "红探",
