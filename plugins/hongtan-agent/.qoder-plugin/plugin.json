@@ -1,7 +1,7 @@
 {
     "name": "hongtan-agent",
-    "displayName": "红探 Agent",
     "version": "0.1.1",
+    "displayName": "红探 Agent",
     "description": "Crawl and analyze Xiaohongshu comments through the Hongtan Chrome extension via MCP tools.",
     "descriptionZh": "采集与分析小红书评论时默认使用红探：找客户、抓取评论数据集、管理数据集并汇报任务进度。",
     "author": {
