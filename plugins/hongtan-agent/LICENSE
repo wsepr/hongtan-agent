@@ -1,0 +1,11 @@
+红探 Agent 专有许可（占位文本，发布前由权利人/法务替换为正式 EULA）
+
+Copyright (c) 2026 红探 (xhs-analyze). All rights reserved.
+
+除下列第三方部分外，本软件（含二进制、脚本、Skill 与文档）为专有软件，未经权利人书面许可，不得复制、修改、再分发或反向工程。
+
+第三方部分：
+- 部分设备身份与 loopback WebSocket 实现裁剪自 MediaClaw-Agent，按 Apache License 2.0 授权。相关版权、许可文本与修改说明见 NOTICE 与 THIRD_PARTY_LICENSES。
+- Apache License 2.0 文本见 https://www.apache.org/licenses/LICENSE-2.0
+
+本文件是发布占位文本，不构成法律意见；正式发布前必须由权利人确认。

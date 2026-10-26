@@ -1,0 +1,14 @@
+红探 Agent 第三方声明
+
+本软件包含裁剪自 MediaClaw-Agent 的代码：
+
+- src/shared/device-identity.ts（原 scripts/device-identity.mjs）
+- src/broker/websocket-server.ts（原 scripts/websocket-server.mjs）
+
+Copyright 2025 MediaClaw-Agent contributors
+Licensed under the Apache License, Version 2.0.
+Modifications copyright (c) 2026 红探 (xhs-analyze).
+
+Apache License 2.0 全文：https://www.apache.org/licenses/LICENSE-2.0
+
+上述第三方部分不适用红探自有代码的专有/EULA 条款；其许可、版权与修改说明按 Apache-2.0 保留。

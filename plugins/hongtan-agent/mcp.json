@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hongtan": {
+      "command": "${QODER_PLUGIN_ROOT}/scripts/launch-agent.cmd",
+      "env": {
+        "HONGTAN_AGENT_HOST": "qoder",
+        "HONGTAN_AGENT_DEVICE_NAME": "红探 Agent (Qoder)"
+      }
+    }
+  }
+}
