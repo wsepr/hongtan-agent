@@ -11,7 +11,7 @@
 
 ## 运行要求
 
-- 需要 Node.js >= 22。Qoder 使用 `${QODER_NODE_RUNTIME}`；WorkBuddy 使用系统 Node 或 `HONGTAN_AGENT_NODE` 指定的 Node。
+- 需要 Node.js >= 22。Qoder 用 PATH 上的 `node` 运行 bundle；WorkBuddy 使用系统 Node 或 `HONGTAN_AGENT_NODE` 指定的 Node。
 - Linux/macOS 若 `.sh` 无可执行位，请用 `sh scripts/launch-agent.sh` 启动。
 - 首次启动不访问 GitHub Release，也不下载平台二进制。
 - 端口 17373 为 Broker/扩展共用；CodeBuddy 与 Qoder 共用同一个 Broker 单例。
